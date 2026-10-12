@@ -738,6 +738,43 @@ direction: it treated the first document as a change from document zero, which
 was correct only because ids started at one. Both are now stated as what `df`
 means and the test says so too.
 
+### 3.0.7 The tokenizer is now the bottleneck, and it is the map
+
+After the two-pass bugs and the map merge, the cost landed in one place. On the
+measured library the tokenizer runs at **9 MB/s**, and 303 MB of text is
+therefore about 33 s on the build machine — which is the single largest remaining
+cost of a build. On a Kindle PW3 the CPU is roughly a fifth of the speed, so the
+same pass is minutes.
+
+Where it goes: `for_each_token_spanned` builds an `OffsetMap` first, and the map
+is one entry per byte of text holding the source byte that byte came from. Four
+bytes per byte of input means a 120 MB table for a 30 MB section, written once
+and read once. Splitting the timing says the map is nearly all of it; the scan
+itself is close to free.
+
+Two changes so far:
+
+- **ASCII fast path through the normalizer.** For an ASCII character NFD,
+  lowercase and NFKC are all the identity and no combining mark can appear, so the
+  per-character pipeline reduces to `to_ascii_lowercase`. Text is mostly ASCII —
+  the punctuation, spacing and digits around every Vietnamese or CJK word — so
+  this took 5 MB/s to 9 MB/s and changed nothing about the output.
+- **`u32` map entries instead of `usize`**, halving the table. Sections are far
+  below 4 GiB, so the narrower type is free.
+
+Both are measured as output-identical: the same 37 tokenizer tests, and the
+200-book index for `Full` is byte-identical at 55 672 832 bytes after every
+change in this section.
+
+What is left is the shape of the map, not its width. A byte-granular table is
+wasteful because the vast majority of entries are the identity: the map only
+needs an entry where a source character stops being one byte away. A checkpoint
+table over non-ASCII characters only would be a fraction of the size and would
+turn `span` into a binary search — which costs a little per token and saves a lot
+per book. That is the next change, and it is deliberately not made here: the
+window for getting it wrong is wide (spans are what the snippet and the reader's
+own words depend on), and the honest number to beat is 9 MB/s.
+
 ### 3.1 Scan (metadata only, does not open content)
 
 ```

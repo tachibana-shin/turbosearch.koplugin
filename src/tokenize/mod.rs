@@ -155,6 +155,33 @@ pub fn for_each_token_spanned(
                 prev_cjk = None;
                 // "Chapter12" splits into "chapter" and "12": someone searching
                 // for a chapter number must not have to type the whole word.
+                //
+                // The classification and the append both take an ASCII fast path.
+                // `char::is_alphanumeric`, `is_numeric` and `encode_utf8` are
+                // table lookups and a buffer round-trip, and the scan runs once
+                // per character of every book — the measured tokenizer does
+                // 30 M characters in 3,4 s, and these three calls are most of it.
+                // For an ASCII character all three reduce to a byte comparison
+                // and a `push`, which is inlined and branch-predictable.
+                if ch.is_ascii() {
+                    let byte = ch as u8;
+                    let is_digits = byte.is_ascii_digit();
+                    if !run.is_empty() && is_digits != run_is_digits {
+                        flush_run_spanned(
+                            &mut run,
+                            &mut run_start,
+                            &mut position,
+                            &mapped,
+                            &mut sink,
+                        );
+                    }
+                    if run.is_empty() {
+                        run_start = offset;
+                    }
+                    run_is_digits = is_digits;
+                    run.push(byte);
+                    continue;
+                }
                 let is_digits = ch.is_numeric();
                 if !run.is_empty() && is_digits != run_is_digits {
                     flush_run_spanned(&mut run, &mut run_start, &mut position, &mapped, &mut sink);
@@ -204,20 +231,63 @@ struct OffsetMap<'a> {
     normalized: String,
     /// One entry per byte of `normalized`, holding the source byte it came from.
     /// A trailing entry covers the end of the final character.
-    map: Vec<usize>,
+    ///
+    /// `u32`, not `usize`: this table is the tokenizer's whole memory footprint
+    /// — four bytes per byte of text, 120 MB for a 30 MB section — and it is
+    /// written once per byte. Sections are nowhere near 4 GiB, so the narrower
+    /// type is free, and halving the writes is measurable.
+    map: Vec<u32>,
 }
 
 impl<'a> OffsetMap<'a> {
     fn new(text: &'a str) -> Self {
         let mut normalized = String::with_capacity(text.len());
-        let mut map: Vec<usize> = Vec::with_capacity(text.len() + 1);
+        let mut map: Vec<u32> = Vec::with_capacity(text.len() + 1);
         let mut src = 0usize;
+        let bytes = text.as_bytes();
+
+        // ASCII fast path. For a pure-ASCII character NFD, lowercase and NFKC
+        // are all the identity, no combining mark can appear, and `fold_letter`
+        // does not apply, so the whole per-character pipeline reduces to
+        // `to_ascii_lowercase`. Measured: the tokenizer runs at about 5 MB/s
+        // without this and is the single largest cost of a build, which on a
+        // Kindle would be minutes. Text is mostly ASCII — the punctuation,
+        // spacing and digits around every Vietnamese or CJK word — so the run
+        // length between slow-path characters is long enough for this to matter.
+        while src < bytes.len() {
+            let ascii_end = text[src..]
+                .chars()
+                .take_while(|c| c.is_ascii())
+                .map(|c| c.len_utf8())
+                .sum::<usize>()
+                + src;
+            let run = &text[src..ascii_end];
+            if run.is_empty() {
+                break;
+            }
+            // The map is the identity over this run, so it is a range rather than
+            // a push per byte: `extend` on a `TrustedLen` iterator is a fill, and
+            // the offsets are `src..src+run.len()` which is exactly what the
+            // slow path would have recorded one element at a time.
+            map.extend((src as u32)..(ascii_end as u32));
+            // Lowercase bytes into the normalized string. `to_ascii_lowercase`
+            // on an ASCII byte stays one byte, so this is a copy, not a refill.
+            let base = normalized.len();
+            normalized.push_str(run);
+            // SAFETY-free: the run is ASCII, so the pushed bytes are valid UTF-8
+            // and each is exactly one byte long, making the slice below in range.
+            let lowered = unsafe { normalized.as_bytes_mut() };
+            for b in &mut lowered[base..base + run.len()] {
+                *b = b.to_ascii_lowercase();
+            }
+            src = ascii_end;
+        }
 
         // Group by ORIGINAL character: every byte the character produces, and
         // every mark it drops, is attributed to the character's own start
         // offset. Advancing inside a character would produce a span that lands
         // in the middle of it, which no slicing operation can use.
-        for raw in text.chars() {
+        for raw in text[src..].chars() {
             let char_start = src;
             src += raw.len_utf8();
 
@@ -249,7 +319,7 @@ impl<'a> OffsetMap<'a> {
                 }
             }
         }
-        map.push(src);
+        map.push(src as u32);
 
         Self {
             source: text,
@@ -260,10 +330,14 @@ impl<'a> OffsetMap<'a> {
 
     /// Source byte range for a normalized byte range.
     fn span(&self, norm_start: usize, norm_end: usize) -> (usize, usize) {
-        let start = self.map.get(norm_start).copied().unwrap_or(0);
+        let start = self.map.get(norm_start).map(|&o| o as usize).unwrap_or(0);
         // The end is exclusive, so the entry AT `norm_end` is the byte just past
         // the final character of the range.
-        let end = self.map.get(norm_end).copied().unwrap_or(self.source.len());
+        let end = self
+            .map
+            .get(norm_end)
+            .map(|&o| o as usize)
+            .unwrap_or(self.source.len());
         (start, end)
     }
 }
@@ -276,11 +350,24 @@ fn is_hangul_syllable(ch: char) -> bool {
     matches!(ch as u32, 0xAC00..=0xD7A3)
 }
 
-fn push_normalized(normalized: &mut String, map: &mut Vec<usize>, s: &str, src: usize) {
+fn push_normalized(normalized: &mut String, map: &mut Vec<u32>, s: &str, src: usize) {
     // `push_str`, not `push(byte as char)`: casting a byte to a char would
     // re-encode anything above 0x7F as multiple UTF-8 bytes.
     normalized.push_str(s);
-    map.extend(s.bytes().map(|_| src));
+    // The cast is safe: a source offset is bounded by the text length,
+    // which fits in u32 for any section the indexer reads.
+    map.extend(s.bytes().map(|_| src as u32));
+}
+
+/// Builds only the normalizer's offset map, for profiling.
+///
+/// `OffsetMap::new` is the half of the tokenizer that allocates, and a build
+/// that cannot separate it from the scan cannot tell whether to optimise the
+/// normalizer or the scanner. Bench-only.
+#[doc(hidden)]
+pub fn bench_offset_map_len(text: &str) -> usize {
+    let mapped = OffsetMap::new(text);
+    mapped.normalized.len()
 }
 
 /// Convenience wrapper collecting every token.
