@@ -1,4 +1,5 @@
 pub mod codec;
+pub mod ffi;
 pub mod format;
 pub mod index;
 pub mod library;

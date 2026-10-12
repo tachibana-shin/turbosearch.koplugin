@@ -12,3 +12,6 @@
 *.idx-shm
 *.idx-wal
 *.idx
+
+# Teal: the compiled Lua is a build artifact, the .tl source is not.
+tl/*.lua

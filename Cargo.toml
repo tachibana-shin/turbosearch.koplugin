@@ -3,6 +3,10 @@ name = "turbosearch"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+# cdylib for the LuaJIT FFI, rlib so the internal tests keep building.
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 zip = "7"
 thiserror = "2"
