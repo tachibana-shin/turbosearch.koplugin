@@ -43,6 +43,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
     let max_books: Option<usize> = std::env::var("MAX_BOOKS").ok().and_then(|v| v.parse().ok());
     let want_search = std::env::var("SEARCH").ok();
+    // `CONTENT_MODE=full|terms|files`, so the three depths can be compared on the
+    // same library without editing a config row.
+    let content_mode = match std::env::var("CONTENT_MODE").as_deref() {
+        Ok("terms") => turbosearch::storage::config::ContentMode::TermsOnly,
+        Ok("files") => turbosearch::storage::config::ContentMode::FileList,
+        _ => turbosearch::storage::config::ContentMode::Full,
+    };
+    eprintln!(
+        "content mode: {content_mode:?} (content {}, positions {})",
+        content_mode.has_content(),
+        content_mode.has_positions()
+    );
 
     if std::fs::remove_file(&db).is_err() {
         // A missing file is fine; anything else the open will report.
@@ -73,6 +85,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let book_id = w.documents() as u16;
+            // `FileList` never opens a book: that is the entire point of the
+            // mode. Indexing 600 books costs a `read_dir` and a metadata read,
+            // not 300 MB of decoded HTML.
+            if !content_mode.has_content() {
+                let record = turbosearch::format::meta::resolve(&entry.path);
+                engine.put_book_batch(
+                    book_id,
+                    &turbosearch::storage::book::Book {
+                        path: entry.path.to_string_lossy().into_owned(),
+                        scope: entry.scope.clone().unwrap_or_default(),
+                        size: entry.size,
+                        mtime_ms: entry.mtime_ms,
+                        inode: entry.inode,
+                        format,
+                        entry_count: 0,
+                        token_count: 0,
+                        indexed_at_ms: now_ms(),
+                        flags: 0,
+                    },
+                )?;
+                engine.put_metadata_batch(book_id, &record)?;
+                records.push((book_id, record));
+                w.end_document()?;
+                indexed += 1;
+                *counts
+                    .entry(format!("{format:?} metadata-only"))
+                    .or_insert(0) += 1;
+                continue;
+            }
             let Ok(sections) = load_sections(&entry.path, format) else {
                 failed += 1;
                 if failed <= 5 {
@@ -99,10 +140,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut b = entrymap::Builder::new(entry_name(&entry.path, entry_idx));
                 // Position and byte offset are offered together, which is what makes
                 // the checkpoint sparse rather than one per token.
-                position = for_each_token_spanned(&text, position, |term, p, start, _end| {
-                    b.offer(p, start as u32);
-                    let _ = w.add(term, book_id as u32, p, entry_idx as u16);
-                });
+                if content_mode.has_positions() {
+                    position = for_each_token_spanned(&text, position, |term, p, start, _end| {
+                        b.offer(p, start as u32);
+                        let _ = w.add(term, book_id as u32, p, entry_idx as u16);
+                    });
+                } else {
+                    // `TermsOnly`: one posting per term and book, which is what
+                    // makes the mode small — the same term repeated two hundred
+                    // times in one book still contributes exactly one posting.
+                    //
+                    // The position counter keeps running across sections, exactly
+                    // as in `Full`: `pos_gap` is a delta within a document, and
+                    // resetting it per section makes positions repeat, which
+                    // underflows the column and makes the term's whole posting
+                    // list unreadable. Measured as a content search that returned
+                    // zero hits in this mode and the right answer in `Full`.
+                    let mut seen: std::collections::BTreeMap<Vec<u8>, (u32, u16)> =
+                        std::collections::BTreeMap::new();
+                    let mut next = position;
+                    for_each_token_spanned(&text, position, |term, p, _start, _end| {
+                        seen.insert(term.to_vec(), (p, entry_idx as u16));
+                        next = next.max(p + 1);
+                    });
+                    for (term, (p, entry)) in seen {
+                        let _ = w.add(&term, book_id as u32, p, entry);
+                    }
+                    position = next;
+                }
                 maps.push((entry_idx as u16, b.finish()));
 
                 text_bytes += text.len() as u64;

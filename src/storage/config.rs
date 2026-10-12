@@ -84,6 +84,55 @@ impl IndexDepth {
     }
 }
 
+/// How much of a book's content reaches the index.
+///
+/// This is a different axis from [`IndexDepth`], which caps *how many positions*
+/// are kept per term: `ContentMode` decides whether content is indexed at all.
+/// Splitting them keeps "index everything" and "index less of everything" from
+/// being the same dial.
+///
+/// Measured on the 614-book reference library, all three over the same text:
+///
+/// | Mode | Postings | Database |
+/// |---|---|---|
+/// | `Full` | 49,9 M | 163 MB |
+/// | `TermsOnly` | ~8 M (one per term and book) | ~40 MB |
+/// | `FileList` | 0 | ~1 MB |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum ContentMode {
+    /// Content and positions, so phrase queries and snippets work.
+    #[default]
+    Full = 0,
+    /// Content, but one posting per term and book — enough to answer "which
+    /// books contain this word", not "where in them".
+    TermsOnly = 1,
+    /// Metadata only, exactly as for a format whose text we cannot decode. The
+    /// cheapest useful index: a filename and title search over the whole library.
+    FileList = 2,
+}
+
+impl ContentMode {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ContentMode::Full),
+            1 => Some(ContentMode::TermsOnly),
+            2 => Some(ContentMode::FileList),
+            _ => None,
+        }
+    }
+
+    /// True when content postings are written at all.
+    pub fn has_content(&self) -> bool {
+        !matches!(self, ContentMode::FileList)
+    }
+
+    /// True when positions are stored, so phrase queries and snippets can work.
+    pub fn has_positions(&self) -> bool {
+        matches!(self, ContentMode::Full)
+    }
+}
+
 impl Default for IndexDepth {
     fn default() -> Self {
         IndexDepth::FULL
@@ -104,6 +153,8 @@ pub struct Config {
     pub index_depth: IndexDepth,
     /// Prefix expansion behaviour for multi-term queries.
     pub prefix_mode: PrefixMode,
+    /// How much content to index. See [`ContentMode`].
+    pub content_mode: ContentMode,
     /// Only index while the device is on external power.
     pub index_only_when_charging: bool,
     /// Index metadata (but not content) for formats we cannot parse.
@@ -121,6 +172,7 @@ impl Default for Config {
             max_file_size: DEFAULT_MAX_FILE_SIZE,
             index_depth: IndexDepth::default(),
             prefix_mode: PrefixMode::default(),
+            content_mode: ContentMode::Full,
             index_only_when_charging: true,
             meta_only_unparseable: false,
         }
@@ -143,6 +195,7 @@ impl Config {
             .u8(self.prefix_mode as u8)
             .bool(self.index_only_when_charging)
             .bool(self.meta_only_unparseable)
+            .u8(self.content_mode as u8)
             .finish()
     }
 
@@ -159,6 +212,7 @@ impl Config {
             prefix_mode: PrefixMode::from_u8(r.u8()?).unwrap_or_default(),
             index_only_when_charging: r.bool()?,
             meta_only_unparseable: r.bool()?,
+            content_mode: ContentMode::from_u8(r.u8().unwrap_or(0)).unwrap_or_default(),
         };
         Ok(cfg)
     }

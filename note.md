@@ -602,6 +602,40 @@ step 2  magic sniff (64 byte) ->  decides the REAL format (opens the file, reads
 - Sniffing **fails** (no magic match, not UTF-8/text) → skip, log at `debug` level. **Do not crash.**
 - The sniffed format **differs** from the extension → **trust the magic**, log a `warn` once per book (helps the user spot a messy library).
 
+### 3.0.3 Three content modes
+
+`ContentMode` decides whether a book's text reaches the index at all. It is a
+different dial from `IndexDepth`, which caps *how many positions* are kept per
+term — without the split, "index less" and "index less of everything" are the
+same control.
+
+| Mode | Postings | What a query can answer |
+|---|---|---|
+| `Full` | one per occurrence | phrase, snippet, "which books" |
+| `TermsOnly` | one per term and book | "which books contain this word" |
+| `FileList` | none | metadata and filename only |
+
+Measured on the reference library (614 EPUB, 303,6 MB of text, 49,9 M tokens):
+
+| Mode | Database | Full build |
+|---|---|---|
+| `FileList` | **0,9 MB** | 28 s |
+| `TermsOnly` | **31,8 MB** (10,5% of text) | 1000 s |
+| `Full` | **163 MB** | 1396 s |
+
+`TermsOnly` is where the interesting saving is. Positions are 80% of the
+postings payload — the `pos_gap` column alone — and dropping them takes the
+index to a fifth of its size while still answering the question a reader asks
+first. What it cannot do is a phrase query ("thám tử" as a pair rather than two
+words) or a snippet, because neither is defined without positions.
+
+`FileList` never opens a book: it is a `read_dir` plus a metadata read per file,
+which is why 619 books cost 28 seconds. It is the right mode for a first
+sync on a big library, or for one where the user only wants to find a title.
+
+The mode is a `CONFIG` column, so it can be changed without a schema change, and
+re-indexing at a different depth is a rescan rather than a rebuild.
+
 ### 3.1 Scan (metadata only, does not open content)
 
 ```

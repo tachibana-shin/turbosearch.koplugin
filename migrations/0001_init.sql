@@ -12,7 +12,7 @@
 -- rows for one file is how a deleted book comes back.
 
 CREATE TABLE IF NOT EXISTS meta (
-    key   TEXT    NOT NULL PRIMARY KEY,
+    key   BLOB    NOT NULL PRIMARY KEY,
     value BLOB    NOT NULL
 );
 
@@ -47,12 +47,12 @@ CREATE TABLE IF NOT EXISTS metadata (
 );
 
 CREATE TABLE IF NOT EXISTS metaidx (
-    key   TEXT    NOT NULL PRIMARY KEY,
+    key   BLOB    NOT NULL PRIMARY KEY,
     value BLOB    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS config (
-    key   TEXT    NOT NULL PRIMARY KEY,
+    key   BLOB    NOT NULL PRIMARY KEY,
     value BLOB    NOT NULL
 );
 
@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS postings (
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS dict (
-    key   TEXT    NOT NULL PRIMARY KEY,
+    key   BLOB    NOT NULL PRIMARY KEY,
     value BLOB    NOT NULL
 );
 

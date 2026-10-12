@@ -1,0 +1,13 @@
+metadata rows: 619, index 212276 bytes
+indexed 619 books (12409 sections), skipped 0, failed 0
+formats: Epub=614 Mobi=5
+text 303610612 bytes, 49881475 tokens
+phases:
+  decode + index + write :  1388.9s
+  metadata + metaidx     :  640.4ms
+  compaction             :     6.0s
+  total                  :  1395.6s
+compaction reclaimed free pages: yes
+db "/home/shin/turbosearch/sqlfull.idx" = 163086336 bytes (163.1 MB)
+index size / text size = 53.7%
+EXIT=0 WALL=1398s

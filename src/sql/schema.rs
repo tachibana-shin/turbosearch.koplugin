@@ -49,6 +49,17 @@ pub const SYNCHRONOUS: &str = "NORMAL";
 /// and wrong in the other.
 pub const MIGRATION: &str = include_str!("../../migrations/0001_init.sql");
 
+/// Why the single-key tables bind BLOBs rather than TEXT.
+///
+/// `dict`, `metaidx`, `config` and `meta` are each one row keyed by a byte string
+/// constant. Their columns are BLOB for that reason: the callers bind the bytes,
+/// and SQLite's type affinity makes a TEXT column compare a bound BLOB with
+/// storage-class ordering instead of by value, which matches no row. The bug that
+/// produced this looked like an empty dictionary while its 42 KB blob sat in the
+/// table, and because the postings still worked, search returned nothing and the
+/// index looked unbuilt.
+pub const KEYS_ARE_BLOBS: () = ();
+
 /// Creates every table, idempotently.
 ///
 /// Called on `Engine::open` because a database file with no schema is an error
