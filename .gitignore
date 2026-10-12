@@ -1,1 +1,7 @@
 /target
+
+# Built index databases (large, machine-specific)
+*.idx
+*.redb
+.indexer.log
+.breakdown.log

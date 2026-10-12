@@ -223,7 +223,9 @@ impl<'a> Writer<'a> {
         if writes.is_empty() {
             return Ok(());
         }
-        self.engine.write(|txn| {
+        // Non-durable: this runs once per flushed term, which is tens of
+        // thousands of times per session. `close` flushes the lot in one sync.
+        self.engine.write_batch(|txn| {
             let mut t = txn.open_table(postings_table())?;
             for (idx, blob) in &writes {
                 t.insert((term, *idx), blob.as_slice())?;
@@ -263,7 +265,12 @@ impl<'a> Writer<'a> {
             }
         }
         dict::store(self.engine, dict)?;
-        dict::clear_deltas(self.engine)
+        dict::clear_deltas(self.engine)?;
+        // Everything written above with `write_batch` is parked in memory until
+        // one durable commit. This is that commit, and it is the only sync the
+        // whole session pays for.
+        let _ = self.engine.flush()?;
+        Ok(())
     }
 
     /// The delta rows this session produced, for `DICT_DELTA`.
@@ -293,7 +300,9 @@ pub fn put_entry_map(
     map: &EntryMap,
 ) -> RunResult<()> {
     let blob = map.encode();
-    engine.write(|txn| {
+    // Non-durable on purpose: this is called once per section, and a durable
+    // commit per call costs an fsync each. See `Engine::write_batch`.
+    engine.write_batch(|txn| {
         let mut t = txn.open_table(entrymap_table())?;
         t.insert((book_id, entry_idx), blob.as_slice())?;
         Ok(())

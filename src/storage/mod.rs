@@ -62,6 +62,8 @@ pub enum RunError {
     Compaction(#[from] redb::CompactionError),
     #[error("packed data: {0}")]
     Pack(#[from] PackError),
+    #[error("redb durability: {0}")]
+    Durability(#[from] redb::SetDurabilityError),
     #[error("{0}")]
     Message(String),
 }
@@ -131,6 +133,38 @@ impl Engine {
         let out = f(&mut txn)?;
         txn.commit()?;
         Ok(out)
+    }
+
+    /// Runs a closure inside a **non-durable** write transaction, and flushes it
+    /// only when asked.
+    ///
+    /// This exists because a bulk index build writes one row per section, and
+    /// each `write` above costs an `fsync`. Measured on a real disk: a full
+    /// library took 34 minutes and stalled after 105 MB, against about nine
+    /// minutes for the same run writing to tmpfs, where the same fsync is a
+    /// no-op. On the device the storage is a real eMMC, so this is the number
+    /// that matters.
+    ///
+    /// `Durability::None` defers the flush until a later commit, so a session
+    /// can write as many transactions as it likes and pay for one sync at the
+    /// end. The caller must finish with [`Engine::flush`], or the work is lost.
+    pub fn write_batch<R>(
+        &self,
+        f: impl FnOnce(&mut redb::WriteTransaction) -> RunResult<R>,
+    ) -> RunResult<R> {
+        let mut txn = self.db.begin_write()?;
+        txn.set_durability(redb::Durability::None)?;
+        let out = f(&mut txn)?;
+        txn.commit()?;
+        Ok(out)
+    }
+
+    /// Persists every non-durable commit, returning whether anything was written.
+    pub fn flush(&self) -> RunResult<bool> {
+        let txn = self.db.begin_write()?;
+        // An empty durable commit is what forces the deferred writes out.
+        txn.commit()?;
+        Ok(true)
     }
 
     /// Reads the `META` row, or `None` when the file was never initialised.
