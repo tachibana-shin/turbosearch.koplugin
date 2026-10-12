@@ -18,7 +18,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use redb::ReadableTable;
 use turbosearch::format::{epub, mobi, plain, sniff};
 use turbosearch::index::{EntryMap, dict, entrymap, query, writer};
 use turbosearch::storage::book::{Format, scan_scope};
@@ -48,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::fs::remove_file(&db).is_err() {
         // A missing file is fine; anything else the open will report.
     }
-    let mut engine = Engine::open(&db).map_err(|e| format!("open {db:?}: {e}"))?;
+    let engine = Engine::open(&db).map_err(|e| format!("open {db:?}: {e}"))?;
 
     let started = Instant::now();
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -93,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 12 000-section library pays for twelve thousand of them; one per
             // book is both cheaper and leaves the file far less fragmented,
             // which is what the final compaction has to clean up.
-            let mut maps: Vec<(u16, Vec<u8>)> = Vec::with_capacity(sections.len());
+            let mut maps: Vec<(u16, EntryMap)> = Vec::with_capacity(sections.len());
             for (entry_idx, text) in sections.iter().enumerate() {
                 // Sections are decoded bytes; tokenizing needs text.
                 let text = String::from_utf8_lossy(text).into_owned();
@@ -104,18 +103,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     b.offer(p, start as u32);
                     let _ = w.add(term, book_id as u32, p, entry_idx as u16);
                 });
-                maps.push((entry_idx as u16, b.finish().encode()));
+                maps.push((entry_idx as u16, b.finish()));
 
                 text_bytes += text.len() as u64;
                 tokens += tokenize::tokenize(&text).len() as u64;
             }
-            engine.write_batch(|txn| {
-                let mut t = txn.open_table(turbosearch::storage::entrymap_table())?;
-                for (entry_idx, blob) in &maps {
-                    t.insert((book_id, *entry_idx), blob.as_slice())?;
-                }
-                Ok(())
-            })?;
+            for (entry_idx, map) in &maps {
+                writer::put_entry_map(&engine, book_id, *entry_idx, map)?;
+            }
 
             w.end_document()?;
             indexed += 1;
@@ -294,23 +289,24 @@ fn show(engine: &Engine, hits: &[query::Hit]) {
 
 /// Every `ENTRYMAP` row the engine holds, keyed by `(book, entry)`.
 fn all_entry_names(engine: &Engine) -> Vec<(u16, u16, EntryMap)> {
-    engine
-        .read(|txn| {
-            let t = match turbosearch::storage::or_empty(
-                txn.open_table(turbosearch::storage::entrymap_table()),
-            )? {
-                Some(t) => t,
-                None => return Ok(Vec::new()),
-            };
-            let mut out = Vec::new();
-            for row in t.iter()? {
-                let (k, v) = row?;
-                let (book, entry) = k.value();
-                out.push((book, entry, EntryMap::decode(v.value())?));
+    let mut out = Vec::new();
+    for book in engine.books_with_entry_maps().unwrap_or_default() {
+        // The engine has no "list every entry of a book" accessor, and adding
+        // one for a diagnostic would be API for its own sake, so walk the
+        // section count the book itself recorded.
+        let count = engine
+            .book(book)
+            .ok()
+            .flatten()
+            .map(|b| b.entry_count)
+            .unwrap_or(0);
+        for entry in 0..count {
+            if let Ok(Some(m)) = writer::get_entry_map(engine, book, entry) {
+                out.push((book, entry, m));
             }
-            Ok(out)
-        })
-        .unwrap_or_default()
+        }
+    }
+    out
 }
 
 fn hit_snippets(

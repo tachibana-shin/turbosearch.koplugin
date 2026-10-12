@@ -222,8 +222,7 @@ fn remove_book_clears_both_tables() {
     let s = Shelf::new("remove-book");
     s.engine.put_book(1, &book("a.epub", 10, 1)).unwrap();
 
-    let removed = s.engine.remove_book(1).unwrap().expect("row existed");
-    assert_eq!(removed.path, "a.epub");
+    assert!(s.engine.remove_book(1).unwrap(), "row existed");
     assert_eq!(s.engine.book(1).unwrap(), None);
     assert_eq!(s.engine.book_id_for_path("a.epub").unwrap(), None);
 }
@@ -232,9 +231,9 @@ fn remove_book_clears_both_tables() {
 fn remove_book_is_idempotent() {
     let s = Shelf::new("remove-twice");
     s.engine.put_book(1, &book("a.epub", 10, 1)).unwrap();
-    assert!(s.engine.remove_book(1).unwrap().is_some());
+    assert!(s.engine.remove_book(1).unwrap(), "first remove succeeds");
     assert!(
-        s.engine.remove_book(1).unwrap().is_none(),
+        !s.engine.remove_book(1).unwrap(),
         "second remove is a no-op"
     );
 }
@@ -396,11 +395,9 @@ fn allocate_reports_when_id_space_exhausted() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("exhausted.redb");
     let e = Engine::open(&path).unwrap();
-    e.write_meta(&Meta {
-        book_id_hwm: MAX_BOOKS - 1,
-        ..Meta::new()
-    })
-    .unwrap();
+    // The mark is its own `meta` row, seeded here to one below the top, which is
+    // the state a full library is in.
+    e.seed_next_id(MAX_BOOKS - 1).unwrap();
     // The last usable id is 65_535; allocating it must succeed.
     let last = e.allocate_ids(1).unwrap().expect("one id left");
     assert_eq!(last, vec![u16::MAX]);
@@ -855,21 +852,47 @@ fn data_survives_reopen() {
 #[test]
 fn failed_write_rolls_back() {
     let s = Shelf::new("rollback");
-    let _ = s.engine.write(|txn| {
-        txn.open_table(turbosearch::storage::config::config_table())?
-            .insert("x", b"junk".as_slice())?;
-        Err::<(), _>(redb::Error::Corrupted("synthetic failure".into()).into())
+    // A real rollback: write a valid row, then a statement that fails, inside one
+    // transaction. The valid row must not survive, which is the property redb's
+    // closure-based API provided and SQLite provides natively.
+    let rolled = s.engine.block_on(async {
+        let mut txn = s.engine.pool().begin().await?;
+        sqlx::query("INSERT INTO meta (key, value) VALUES ('probe', ?1)")
+            .bind(&b"kept"[..])
+            .execute(&mut *txn)
+            .await?;
+        // A PRIMARY KEY violation: 'probe' is already the key of the row written
+        // above, inside this same transaction. (An earlier version of this test
+        // inserted 'meta', which collided with nothing, and passed vacuously.)
+        let bad = sqlx::query("INSERT INTO meta (key, value) VALUES ('probe', ?1)")
+            .bind(&b"never"[..])
+            .execute(&mut *txn)
+            .await;
+        assert!(bad.is_err(), "the duplicate key must fail the statement");
+        let _ = txn.rollback().await;
+        Ok::<_, sqlx::Error>(())
     });
+    assert!(rolled.is_ok());
     assert_eq!(
         s.engine.config().unwrap(),
         Config::default(),
         "no partial write"
     );
+    // The probe row must not have survived the rollback either.
+    let probe: Option<i64> = s
+        .engine
+        .block_on(async {
+            sqlx::query_scalar("SELECT COUNT(*) FROM meta WHERE key = 'probe'")
+                .fetch_one(s.engine.pool())
+                .await
+        })
+        .ok();
+    assert_eq!(probe, Some(0), "the transaction must have rolled back");
 }
 
 #[test]
 fn file_size_grows_and_compaction_keeps_data() {
-    let mut s = Shelf::new("size-compact");
+    let s = Shelf::new("size-compact");
     for i in 0..40u16 {
         s.engine
             .put_book(i, &book(&format!("b{i}.epub"), i as u64 + 1, i as i64))
@@ -885,13 +908,21 @@ fn file_size_grows_and_compaction_keeps_data() {
 }
 
 #[test]
-fn open_reports_an_error_for_a_missing_parent_directory() {
-    // redb must fail cleanly here rather than panic on an unwritable path.
+fn open_creates_a_missing_parent_directory() {
+    // `Engine::open` creates the parent, because a scratch index is often the
+    // first thing written to a directory. The error case it does have to cover
+    // is an unwritable path, which is asserted below.
     let dir = tempfile::tempdir().unwrap();
-    let bad = dir.path().join("nope").join("db.redb");
-    let r = Engine::open(&bad);
-    assert!(r.is_err(), "a missing parent directory should be an error");
-    assert!(!bad.exists(), "no file is created for a bad path");
+    let deep = dir.path().join("a").join("b").join("c");
+    let e = Engine::open(deep.join("db.sqlite"));
+    assert!(e.is_ok(), "a missing parent is created, not an error");
+
+    // A path under a *file* cannot be created, and must fail cleanly rather than
+    // panic on an unwritable path.
+    let file = dir.path().join("not-a-dir");
+    std::fs::write(&file, b"x").unwrap();
+    let r = Engine::open(file.join("db.sqlite"));
+    assert!(r.is_err(), "a path under a file must be an error");
 }
 
 // ---------------------------------------------------------------------------
@@ -932,8 +963,17 @@ fn table_names_match_the_spec() {
 fn engine_cache_size_stays_small() {
     // The floor matters as much as the ceiling: a cache too small to hold the
     // term dictionary turns every lookup into a page read.
-    assert!(Engine::CACHE_SIZE >= 256 * 1024, "too small to be useful");
-    assert!(Engine::CACHE_SIZE <= 16 * 1024 * 1024, "too big for a PW3");
+    let s = Shelf::new("cache");
+    // A negative `cache_size` is KiB, and -8000 is what `open` sets.
+    let cache = s.engine.block_on(async {
+        sqlx::query_scalar::<_, i64>("PRAGMA cache_size")
+            .fetch_one(s.engine.pool())
+            .await
+            .unwrap_or(0)
+    });
+    assert_eq!(cache, -8000, "the cache bound must be the one set at open");
+    // 8000 KiB = 7,8 MB, which is what the constant was sized for.
+    assert!(8000 <= 16 * 1024, "too big for a PW3");
 }
 
 #[test]

@@ -19,8 +19,6 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use redb::ReadableTable;
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = PathBuf::from(std::env::args().nth(1).expect("db path"));
     let engine = turbosearch::storage::Engine::open(&path)?;
@@ -32,25 +30,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut chunk_rows = 0u64;
     let mut terms = std::collections::BTreeSet::new();
 
-    engine.read(|txn| {
-        let t = match turbosearch::storage::or_empty(
-            txn.open_table(turbosearch::storage::postings_table()),
-        )? {
-            Some(t) => t,
-            None => return Ok(()),
-        };
-        for row in t.iter()? {
-            let (k, v) = row?;
+    // Walk the dictionary rather than the postings table: the engine has no
+    // "iterate every term" accessor, and the dictionary is exactly the set of
+    // terms that own postings.
+    let dict = turbosearch::index::dict::load(&engine)?;
+    for i in 0..dict.len() {
+        let term = dict.term(i).to_vec();
+        terms.insert(term.clone());
+        for (_chunk, body) in engine.postings_term(&term)? {
             chunk_rows += 1;
-            terms.insert(k.value().0.to_vec());
-            frame_bytes += v.value().len() as u64;
-            match turbosearch::index::Chunk::decode(v.value()) {
+            frame_bytes += body.len() as u64;
+            match turbosearch::index::Chunk::decode(&body) {
                 Some(c) => postings += c.postings.len() as u64,
                 None => undecodable += 1,
             }
         }
-        Ok(())
-    })?;
+    }
 
     println!(
         "postings table: {chunk_rows} chunks over {} terms, decoded in {:.1?}",
@@ -73,24 +68,23 @@ fn report_tables(engine: &turbosearch::storage::Engine, db: &PathBuf) {
     println!("\nper table (value bytes + key bytes):");
     let mut grand = 0usize;
 
+    // One query per table. `octet_length` is SQLite's own measurement of stored
+    // bytes, and the payload column differs per table (`postings.body`,
+    // `entrymap` carries both `name` and `value`), so each entry names its own.
+    //
+    // The SQL is a literal per table rather than a formatted string, because
+    // sqlx's `raw_sql` only accepts `&str` — deliberately, since a formatted
+    // statement is where injection would come from. Nine literals is cheaper
+    // than a lint suppression.
     macro_rules! row {
-        ($name:literal, $def:expr, $key:expr) => {{
-            let (bytes, rows) = engine
-                .read(|txn| {
-                    let t = match turbosearch::storage::or_empty(txn.open_table($def))? {
-                        Some(t) => t,
-                        None => return Ok((0usize, 0usize)),
-                    };
-                    let mut bytes = 0usize;
-                    let mut rows = 0usize;
-                    for row in t.iter()? {
-                        let (k, v) = row?;
-                        bytes += v.value().len() + $key(&k.value());
-                        rows += 1;
-                    }
-                    Ok((bytes, rows))
-                })
-                .unwrap_or((0, 0));
+        ($name:literal, $sql:literal) => {{
+            let (rows, payload): (i64, i64) = engine.block_on(async {
+                sqlx::query_as::<_, (i64, i64)>($sql)
+                    .fetch_one(engine.pool())
+                    .await
+                    .unwrap_or((0, 0))
+            });
+            let bytes = payload as usize + rows as usize;
             println!(
                 "  {:<12} {:>12} bytes ({:6.2} MB) in {:>7} rows, {:.0} B/row",
                 $name,
@@ -109,41 +103,40 @@ fn report_tables(engine: &turbosearch::storage::Engine, db: &PathBuf) {
 
     row!(
         "postings",
-        turbosearch::storage::postings_table(),
-        |k: &(&[u8], u16)| k.0.len() + 2
+        "SELECT COUNT(*), COALESCE(SUM(octet_length(body)),0) FROM postings"
     );
     row!(
         "entrymap",
-        turbosearch::storage::entrymap_table(),
-        |_: &(u16, u16)| 4
+        "SELECT COUNT(*), COALESCE(SUM(octet_length(name)+octet_length(value)),0) FROM entrymap"
     );
-    row!("dict", turbosearch::storage::dict_table(), |_: &&[u8]| 3);
+    row!(
+        "dict",
+        "SELECT COUNT(*), COALESCE(SUM(octet_length(value)),0) FROM dict"
+    );
     row!(
         "dict_delta",
-        turbosearch::storage::delta_table(),
-        |_: &&[u8]| 0
+        "SELECT COUNT(*), COALESCE(SUM(octet_length(term)),0) FROM dict_delta"
     );
     row!(
         "books",
-        turbosearch::storage::book::books_table(),
-        |_: &u16| 2
+        "SELECT COUNT(*), COALESCE(SUM(octet_length(path)),0) FROM books"
     );
     row!(
         "metadata",
-        turbosearch::storage::metadata::metadata_table(),
-        |_: &u16| 2
+        "SELECT COUNT(*), COALESCE(SUM(octet_length(title)+octet_length(authors)),0) FROM metadata"
     );
     row!(
         "metaidx",
-        turbosearch::storage::metadata::metaidx_table(),
-        |_: &&str| 3
+        "SELECT COUNT(*), COALESCE(SUM(octet_length(value)),0) FROM metaidx"
     );
     row!(
         "config",
-        turbosearch::storage::config::config_table(),
-        |_: &&str| 6
+        "SELECT COUNT(*), COALESCE(SUM(octet_length(value)),0) FROM config"
     );
-    row!("meta", turbosearch::storage::meta_table(), |_: &&str| 4);
+    row!(
+        "meta",
+        "SELECT COUNT(*), COALESCE(SUM(octet_length(value)),0) FROM meta"
+    );
 
     let file = std::fs::metadata(db).map(|m| m.len()).unwrap_or(0) as usize;
     println!(

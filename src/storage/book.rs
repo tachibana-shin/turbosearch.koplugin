@@ -9,8 +9,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use redb::{ReadableDatabase, ReadableTable};
-
 use super::pack::{Reader, Writer};
 use super::{Config, Engine, RunResult};
 
@@ -525,61 +523,74 @@ fn walk_root(
     Ok(())
 }
 
+/// PATH lookups and whole-table reads.
+///
+/// `PATHS` is no longer a separate table: `books` has a unique index on `path`,
+/// which is the same information with one fewer place to fall out of sync. The
+/// `OR IGNORE` on the write path is what keeps a duplicate path from failing a
+/// whole book batch — a library that contains the same file twice, which happens
+/// with symlinked or rebranched calibre libraries, used to abort the scan.
 impl Engine {
-    /// Loads `path -> book_id` for the whole `PATHS` table.
+    /// Loads `path -> book_id` for every book.
     pub fn read_paths(&self) -> RunResult<HashMap<String, u16>> {
-        let txn = self.db.begin_read()?;
-        let mut out = HashMap::new();
-        if let Some(table) = super::or_empty(txn.open_table(paths_table()))? {
-            let iter = table.iter()?;
-            for item in iter {
-                let (k, v) = item?;
-                out.insert(k.value().to_owned(), v.value());
-            }
-        }
-        Ok(out)
+        self.block_on(async {
+            let rows = sqlx::query_as::<_, PathRow>("SELECT path, id FROM books ORDER BY path")
+                .fetch_all(self.pool())
+                .await?;
+            Ok(rows.into_iter().map(|r| (r.path, r.id as u16)).collect())
+        })
     }
 
     /// Looks up one `book_id` by path.
     pub fn book_id_for_path(&self, path: &str) -> RunResult<Option<u16>> {
-        let txn = self.db.begin_read()?;
-        let Some(table) = super::or_empty(txn.open_table(paths_table()))? else {
-            return Ok(None);
-        };
-        Ok(table.get(path)?.map(|v| v.value()))
+        self.block_on(async {
+            let id: Option<i64> = crate::sql::engine::or_empty(
+                sqlx::query_scalar::<_, i64>("SELECT id FROM books WHERE path = ?1")
+                    .bind(path)
+                    .fetch_one(self.pool())
+                    .await,
+            )?;
+            Ok(id.and_then(|i| u16::try_from(i).ok()))
+        })
     }
 
     /// Reads one `BOOKS` row.
     pub fn book(&self, id: u16) -> RunResult<Option<Book>> {
-        let txn = self.db.begin_read()?;
-        let Some(table) = super::or_empty(txn.open_table(books_table()))? else {
-            return Ok(None);
-        };
-        Ok(table
-            .get(id)?
-            .map(|v| Book::decode(v.value()))
-            .transpose()?)
+        self.block_on(async {
+            let row: Option<crate::sql::engine::BookRow> = crate::sql::engine::or_empty(
+                sqlx::query_as::<_, crate::sql::engine::BookRow>(
+                    "SELECT id, path, scope, size, mtime_ms, inode, format,
+                            entry_count, token_count, indexed_at_ms, flags
+                     FROM books WHERE id = ?1",
+                )
+                .bind(id as i64)
+                .fetch_one(self.pool())
+                .await,
+            )?;
+            Ok(row.map(|r| r.into_book().1))
+        })
     }
 
     /// Reads every `BOOKS` row, in `book_id` order.
     pub fn all_books(&self) -> RunResult<Vec<(u16, Book)>> {
-        let txn = self.db.begin_read()?;
-        let mut out = Vec::new();
-        let Some(table) = super::or_empty(txn.open_table(books_table()))? else {
-            return Ok(out);
-        };
-        let iter = table.iter()?;
-        for item in iter {
-            let (k, v) = item?;
-            out.push((k.value(), Book::decode(v.value())?));
-        }
-        Ok(out)
+        self.block_on(async {
+            let rows = sqlx::query_as::<_, crate::sql::engine::BookRow>(
+                "SELECT id, path, scope, size, mtime_ms, inode, format,
+                        entry_count, token_count, indexed_at_ms, flags
+                 FROM books ORDER BY id",
+            )
+            .fetch_all(self.pool())
+            .await?;
+            Ok(rows.into_iter().map(|r| r.into_book()).collect())
+        })
     }
 }
 
-/// Typeless `TableDefinition` builders shared by the read and write paths.
-pub fn books_table() -> redb::TableDefinition<'static, u16, &'static [u8]> {
-    redb::TableDefinition::new(super::TABLE_BOOKS)
+/// A `(path, id)` pair.
+#[derive(sqlx::FromRow)]
+struct PathRow {
+    path: String,
+    id: i64,
 }
 
 pub fn paths_table() -> redb::TableDefinition<'static, &'static str, u16> {

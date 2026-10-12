@@ -4,8 +4,6 @@
 //! never reads a config file: the Lua side pushes changes through
 //! `config_set()` over the FFI boundary.
 
-use redb::ReadableDatabase;
-
 use super::pack::{Reader, Writer};
 use super::{Engine, RunResult};
 
@@ -212,30 +210,20 @@ impl Config {
 }
 
 impl Engine {
-    /// Reads the stored config, or defaults when the table is empty.
+    /// Reads the stored config, or defaults when nothing is stored.
     pub fn config(&self) -> RunResult<Config> {
-        let txn = self.db.begin_read()?;
-        let Some(table) = super::or_empty(txn.open_table(config_table()))? else {
-            return Ok(Config::default());
-        };
-        Ok(table
-            .get(Config::KEY)?
-            .map(|v| Config::decode(v.value()))
-            .transpose()?
-            .unwrap_or_default())
+        // No table-exists branch: the schema is created on open, so an empty
+        // table means the user never set anything.
+        match self.config_raw()? {
+            Some(b) => {
+                Config::decode(&b).map_err(|e| crate::storage::RunError::Message(e.to_string()))
+            }
+            None => Ok(Config::default()),
+        }
     }
 
     /// Writes the whole config in one transaction.
     pub fn set_config(&self, cfg: &Config) -> RunResult<()> {
-        let bytes = cfg.encode();
-        self.write(|txn| {
-            txn.open_table(config_table())?
-                .insert(Config::KEY, bytes.as_slice())?;
-            Ok(())
-        })
+        self.write_config_raw(&cfg.encode())
     }
-}
-
-pub fn config_table() -> redb::TableDefinition<'static, &'static str, &'static [u8]> {
-    redb::TableDefinition::new(super::TABLE_CONFIG)
 }

@@ -270,7 +270,14 @@ fn the_index_is_small_enough_to_hold_in_ram() {
         return;
     };
     let index: MetaIndex = store.engine.meta_index().unwrap();
-    assert_eq!(index.len(), indexed);
+    // One entry per indexed book, and this equality is the check that the
+    // rebuild actually saw every row rather than stopping at one.
+    assert_eq!(
+        index.len(),
+        indexed,
+        "rebuilt index has {} entries for {indexed} books",
+        index.len()
+    );
     // A 6,000-book library should land in the low megabytes, so a 60-book sample
     // is comfortably a few hundred kilobytes.
     assert!(

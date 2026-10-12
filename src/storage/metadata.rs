@@ -12,8 +12,6 @@
 //! linearly with `memchr`, which keeps query time proportional to the metadata
 //! size rather than to the number of books.
 
-use redb::ReadableDatabase;
-
 use super::pack::{Reader, Writer};
 use super::{Engine, RunResult};
 
@@ -294,58 +292,121 @@ impl MetaIndex {
 impl Engine {
     /// Reads one metadata record.
     pub fn metadata(&self, book_id: u16) -> RunResult<Option<BookMetaRecord>> {
-        let txn = self.db.begin_read()?;
-        let Some(table) = super::or_empty(txn.open_table(metadata_table()))? else {
-            return Ok(None);
-        };
-        Ok(table
-            .get(book_id)?
-            .map(|v| BookMetaRecord::decode(v.value()))
-            .transpose()?)
+        self.block_on(async {
+            let row: Option<crate::sql::engine::MetaRow> = crate::sql::engine::or_empty(
+                sqlx::query_as::<_, crate::sql::engine::MetaRow>(
+                    "SELECT title, authors, language, publisher, series, series_index,
+                            description, identifiers, provenance, description_truncated
+                     FROM metadata WHERE book_id = ?1",
+                )
+                .bind(book_id as i64)
+                .fetch_one(self.pool())
+                .await,
+            )?;
+            Ok(row.map(|r| r.into_record()))
+        })
     }
 
     /// Writes one metadata record.
+    ///
+    /// `ON CONFLICT` updates every column, so a book re-indexed with a worse
+    /// sidecar cannot keep the fields of the previous run.
     pub fn put_metadata(&self, book_id: u16, record: &BookMetaRecord) -> RunResult<()> {
-        let bytes = record.encode();
-        self.write(|txn| {
-            txn.open_table(metadata_table())?
-                .insert(book_id, bytes.as_slice())?;
+        let r = crate::sql::engine::MetaRow::from_record(record);
+        self.block_on(async {
+            sqlx::query(
+                "INSERT INTO metadata
+                     (book_id, title, authors, language, publisher, series, series_index,
+                      description, identifiers, provenance, description_truncated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(book_id) DO UPDATE SET
+                     title = excluded.title, authors = excluded.authors,
+                     language = excluded.language, publisher = excluded.publisher,
+                     series = excluded.series, series_index = excluded.series_index,
+                     description = excluded.description, identifiers = excluded.identifiers,
+                     provenance = excluded.provenance,
+                     description_truncated = excluded.description_truncated",
+            )
+            .bind(book_id as i64)
+            .bind(&r.title)
+            .bind(&r.authors)
+            .bind(&r.language)
+            .bind(&r.publisher)
+            .bind(&r.series)
+            .bind(r.series_index)
+            .bind(&r.description)
+            .bind(&r.identifiers)
+            .bind(r.provenance)
+            .bind(r.description_truncated)
+            .execute(self.pool())
+            .await?;
             Ok(())
         })
     }
 
-    /// [`Engine::put_metadata`] without the fsync, for bulk loads.
+    /// [`Engine::put_metadata`] without the per-row fsync, for bulk loads.
     ///
-    /// A durable commit here costs about 160 ms on a real disk, which is the
+    /// A durable commit here costs about 160 ms on a real disk, which was the
     /// difference between an indexing session finishing and not.
     pub fn put_metadata_batch(&self, book_id: u16, record: &BookMetaRecord) -> RunResult<()> {
-        let bytes = record.encode();
-        self.write_batch(|txn| {
-            txn.open_table(metadata_table())?
-                .insert(book_id, bytes.as_slice())?;
+        let r = crate::sql::engine::MetaRow::from_record(record);
+        self.block_on(async {
+            sqlx::query(
+                "INSERT INTO metadata
+                     (book_id, title, authors, language, publisher, series, series_index,
+                      description, identifiers, provenance, description_truncated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(book_id) DO UPDATE SET
+                     title = excluded.title, authors = excluded.authors,
+                     language = excluded.language, publisher = excluded.publisher,
+                     series = excluded.series, series_index = excluded.series_index,
+                     description = excluded.description, identifiers = excluded.identifiers,
+                     provenance = excluded.provenance,
+                     description_truncated = excluded.description_truncated",
+            )
+            .bind(book_id as i64)
+            .bind(&r.title)
+            .bind(&r.authors)
+            .bind(&r.language)
+            .bind(&r.publisher)
+            .bind(&r.series)
+            .bind(r.series_index)
+            .bind(&r.description)
+            .bind(&r.identifiers)
+            .bind(r.provenance)
+            .bind(r.description_truncated)
+            .execute(self.pool())
+            .await?;
             Ok(())
         })
     }
 
     /// Drops a metadata record when its book is removed.
     pub fn remove_metadata(&self, book_id: u16) -> RunResult<()> {
-        self.write(|txn| {
-            txn.open_table(metadata_table())?.remove(book_id)?;
+        self.block_on(async {
+            sqlx::query("DELETE FROM metadata WHERE book_id = ?1")
+                .bind(book_id as i64)
+                .execute(self.pool())
+                .await?;
             Ok(())
         })
     }
 
     /// Reads the whole `METAIDX`.
     pub fn meta_index(&self) -> RunResult<MetaIndex> {
-        let txn = self.db.begin_read()?;
-        let Some(table) = super::or_empty(txn.open_table(metaidx_table()))? else {
-            return Ok(MetaIndex::new());
-        };
-        Ok(table
-            .get(METAIDX_KEY)?
-            .map(|v| MetaIndex::decode(v.value()))
-            .transpose()?
-            .unwrap_or_default())
+        self.block_on(async {
+            let row: Option<Vec<u8>> = crate::sql::engine::or_empty(
+                sqlx::query_scalar::<_, Vec<u8>>("SELECT value FROM metaidx WHERE key = ?1")
+                    .bind(METAIDX_KEY)
+                    .fetch_one(self.pool())
+                    .await,
+            )?;
+            match row {
+                Some(b) => MetaIndex::decode(&b)
+                    .map_err(|e| crate::storage::RunError::Message(e.to_string())),
+                None => Ok(MetaIndex::new()),
+            }
+        })
     }
 
     /// Replaces the whole `METAIDX`.
@@ -353,10 +414,16 @@ impl Engine {
     /// Rewriting one value per indexing session, rather than one per book, is
     /// what keeps the write cost proportional to metadata rather than to books.
     pub fn put_meta_index(&self, index: &MetaIndex) -> RunResult<()> {
-        let bytes = index.encode();
-        self.write(|txn| {
-            txn.open_table(metaidx_table())?
-                .insert(METAIDX_KEY, bytes.as_slice())?;
+        let blob = index.encode();
+        self.block_on(async {
+            sqlx::query(
+                "INSERT INTO metaidx (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            )
+            .bind(METAIDX_KEY)
+            .bind(&blob)
+            .execute(self.pool())
+            .await?;
             Ok(())
         })
     }
@@ -370,27 +437,45 @@ pub const METAIDX_KEY: &str = "metaidx";
 /// Normalization runs here rather than at write time so a tokenizer change only
 /// needs a rebuild, not a re-extraction.
 pub fn rebuild_index(engine: &Engine) -> RunResult<MetaIndex> {
-    use redb::ReadableTable;
     let mut index = MetaIndex::new();
 
     // Only ids that still exist in `BOOKS` are included, so a row orphaned by a
-    // partial deletion cannot resurrect a book in search results.
-    let live: std::collections::HashSet<u16> =
-        engine.all_books()?.into_iter().map(|(id, _)| id).collect();
+    // partial deletion cannot resurrect a book in search results. The join does
+    // that filtering here, in the database, rather than by loading every book
+    // into a set as the redb version had to.
+    engine.block_on(async {
+        let rows = sqlx::query!(
+            "SELECT m.book_id, m.title, m.authors, m.series, m.description
+             FROM metadata m
+             JOIN books b ON b.id = m.book_id
+             ORDER BY m.book_id"
+        )
+        .fetch_all(engine.pool())
+        .await?;
 
-    let txn = engine.db().begin_read()?;
-    if let Some(table) = super::or_empty(txn.open_table(metadata_table()))? {
-        let iter = table.iter()?;
-        for item in iter {
-            let (k, v) = item?;
-            let id = k.value();
-            if !live.contains(&id) {
+        for r in rows {
+            let Some(id) = u16::try_from(r.book_id).ok() else {
                 continue;
+            };
+            // The same concatenation `search_blob` performs, spelled out because
+            // the record is not materialised: this rebuild runs over the whole
+            // library and materialising one `BookMetaRecord` per row just to
+            // join four strings was measurable.
+            let mut blob = String::new();
+            blob.push_str(&r.title);
+            blob.push('\n');
+            blob.push_str(&r.authors);
+            blob.push('\n');
+            blob.push_str(&r.series);
+            if !r.description.is_empty() {
+                blob.push('\n');
+                blob.push_str(&r.description);
             }
-            let record = BookMetaRecord::decode(v.value())?;
-            index.push(id, &record.search_blob());
+            index.push(id, &blob);
         }
-    }
+        Ok::<_, sqlx::Error>(())
+    })?;
+
     engine.put_meta_index(&index)?;
     Ok(index)
 }

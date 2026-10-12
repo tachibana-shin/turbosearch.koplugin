@@ -17,8 +17,7 @@
 use std::collections::BTreeMap;
 
 use crate::index::{Chunk, EntryMap, Posting, dict, posting};
-use crate::storage::{Engine, RunResult, entrymap_table, postings_table};
-use redb::ReadableTable;
+use crate::storage::{Engine, RunResult};
 
 /// Positions kept per `(term, document)` before the term is flagged partial.
 ///
@@ -234,13 +233,9 @@ impl<'a> Writer<'a> {
         }
         // Non-durable: this runs once per flushed term, which is tens of
         // thousands of times per session. `close` flushes the lot in one sync.
-        self.engine.write_batch(|txn| {
-            let mut t = txn.open_table(postings_table())?;
-            for (idx, blob) in &writes {
-                t.insert((term, *idx), blob.as_slice())?;
-            }
-            Ok(())
-        })?;
+        for (idx, blob) in &writes {
+            self.engine.put_postings_chunk(term, *idx, blob)?;
+        }
 
         self.next_chunk.insert(term.to_vec(), next);
         self.counts.entry(term.to_vec()).or_default().chunks_written += writes.len() as u32;
@@ -308,57 +303,25 @@ pub fn put_entry_map(
     entry_idx: u16,
     map: &EntryMap,
 ) -> RunResult<()> {
-    let blob = map.encode();
-    // Non-durable on purpose: this is called once per section, and a durable
-    // commit per call costs an fsync each. See `Engine::write_batch`.
-    engine.write_batch(|txn| {
-        let mut t = txn.open_table(entrymap_table())?;
-        t.insert((book_id, entry_idx), blob.as_slice())?;
-        Ok(())
-    })
+    engine.put_entry_map(book_id, entry_idx, map)
 }
 
 /// Reads one `ENTRYMAP` row.
 pub fn get_entry_map(engine: &Engine, book_id: u16, entry_idx: u16) -> RunResult<Option<EntryMap>> {
-    engine.read(|txn| match txn.open_table(entrymap_table()) {
-        Ok(t) => match t.get((book_id, entry_idx))? {
-            Some(v) => Ok(Some(EntryMap::decode(v.value())?)),
-            None => Ok(None),
-        },
-        Err(_) => Ok(None),
-    })
+    engine.entry_map(book_id, entry_idx)
 }
 
 /// Drops every `ENTRYMAP` row of a book, so its snippets can no longer resolve.
 ///
 /// Called from `Engine::remove_book`; without it a removed book would still be
 /// reachable through a cached posting.
-pub fn remove_entry_maps(engine: &Engine, book_id: u16) -> RunResult<()> {
-    let rows: Vec<u16> = engine.read(|txn| {
-        let t = match txn.open_table(entrymap_table()) {
-            Ok(t) => t,
-            Err(_) => return Ok(Vec::new()),
-        };
-        let mut out = Vec::new();
-        for row in t.iter()? {
-            let (k, _) = row?;
-            if k.value().0 == book_id {
-                out.push(k.value().1);
-            }
-        }
-        Ok(out)
-    })?;
+pub fn remove_entry_maps(_engine: &Engine, _book_id: u16) -> RunResult<()> {
+    // `remove_book` now deletes them in the same transaction as the book, so
+    // there is nothing left to sweep here.
+    let rows: Vec<u16> = Vec::new();
 
-    if rows.is_empty() {
-        return Ok(());
-    }
-    engine.write(|txn| {
-        let mut t = txn.open_table(entrymap_table())?;
-        for eid in rows {
-            t.remove((book_id, eid))?;
-        }
-        Ok(())
-    })
+    let _ = rows;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -375,23 +338,9 @@ mod tests {
 
     fn chunk_count(engine: &Engine, term: &[u8]) -> u32 {
         engine
-            .read(|txn| {
-                // A database that has never written postings has no table yet;
-                // that is a count of zero, not an error.
-                let t = match crate::storage::or_empty(txn.open_table(postings_table()))? {
-                    Some(t) => t,
-                    None => return Ok(0),
-                };
-                let mut n = 0u32;
-                for row in t.iter()? {
-                    let (k, _) = row?;
-                    if k.value().0 == term {
-                        n += 1;
-                    }
-                }
-                Ok(n)
-            })
-            .unwrap()
+            .postings_term(term)
+            .map(|v| v.len() as u32)
+            .unwrap_or(0)
     }
 
     #[test]
@@ -565,8 +514,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("c.idx");
         let mut dict = dict::Dict::new();
-        let mut engine;
-        let uncompacted;
+        let engine;
 
         {
             engine = Engine::open(&path).unwrap();
@@ -577,18 +525,20 @@ mod tests {
                 w.end_document().unwrap();
             }
             w.close(&mut dict).unwrap();
-            uncompacted = engine.file_size();
         }
-        let compacted = engine.compact().unwrap();
+        engine.compact().unwrap();
         let after = engine.file_size();
 
-        assert!(compacted, "the session must have left pages to reclaim");
+        // The property that matters is not that the file shrinks — SQLite reuses
+        // free pages as it writes, so there is nothing to reclaim after the fact
+        // — but that it stays proportional to the data rather than to the number
+        // of transactions that produced it.
+        let page = crate::sql::schema::PAGE_SIZE;
         assert!(
-            after < uncompacted,
-            "compaction must shrink the file: {uncompacted} -> {after}"
+            after <= page as u64 * 20,
+            "index is {after} bytes after 400 transactions; a churning writer would be near {}",
+            page * 400
         );
-        // The data itself is a few kilobytes.
-        assert!(after < 64 * 1024, "compacted index is {after} bytes");
     }
 
     #[test]
@@ -694,7 +644,10 @@ mod tests {
         put_entry_map(&e, 3, 0, &m).unwrap();
         put_entry_map(&e, 3, 1, &m).unwrap();
         put_entry_map(&e, 4, 0, &m).unwrap();
-        remove_entry_maps(&e, 3).unwrap();
+        // `remove_book` deletes the entry maps in the same transaction as the
+        // book, which is the only thing that does any more: `remove_entry_maps`
+        // became a no-op once there was no separate table to sweep.
+        e.remove_book(3).unwrap();
 
         assert!(get_entry_map(&e, 3, 0).unwrap().is_none());
         assert!(get_entry_map(&e, 3, 1).unwrap().is_none());

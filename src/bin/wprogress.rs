@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::fs::remove_file(&db).is_err() {
         // Nothing to remove: fine, the open reports anything else.
     }
-    let mut engine = turbosearch::storage::Engine::open(&db)?;
+    let engine = turbosearch::storage::Engine::open(&db)?;
     let started = Instant::now();
     let mut words = 0u64;
     let mut secs = 0usize;

@@ -22,8 +22,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::index::{Dict, EntryMap, Posting, posting};
-use crate::storage::{Engine, RunResult, postings_table};
+use crate::index::{Dict, Posting, posting};
+use crate::storage::{Engine, RunResult};
 use crate::tokenize;
 
 /// Terms a prefix query may expand to, and the document limit it may reach.
@@ -132,40 +132,28 @@ pub fn expand(dict: &Dict, term: &[u8]) -> (Vec<Vec<u8>>, Status) {
 /// library, because the table has ~70 k rows and only the handful belonging to
 /// one term are wanted.
 pub fn term_postings(engine: &Engine, term: &[u8]) -> RunResult<Vec<Posting>> {
-    engine.read(|txn| {
-        // No postings table yet means nothing was ever indexed, which is an
-        // empty result rather than an error.
-        let t = match crate::storage::or_empty(txn.open_table(postings_table()))? {
-            Some(t) => t,
-            None => return Ok(Vec::new()),
-        };
+    // The seek survives the move: `postings` has `PRIMARY KEY (term, chunk)`, so
+    // `WHERE term = ?` is an index range scan rather than a table filter. What
+    // does not survive is the raw key encoding, and with it the ordering bug
+    // that needed a re-sort by `first_doc` on the way out.
+    let rows = engine.postings_term(term)?;
 
-        // The key is `(term, chunk_idx)`; bounding both ends by the prefix
-        // makes redb seek straight to the first row and stop at the last.
-        let start = (term, u16::MIN);
-        let end = (term, u16::MAX);
-
-        let mut chunks: Vec<posting::Chunk> = Vec::new();
-        for row in t.range(start..=end)? {
-            let (_k, v) = row?;
-            // An unreadable chunk means that part of the list is missing;
-            // continuing with the rest is still useful, and reporting
-            // nothing would hide results that exist.
-            if let Some(c) = posting::Chunk::decode(v.value()) {
-                chunks.push(c);
-            }
+    let mut chunks: Vec<posting::Chunk> = Vec::new();
+    for (_chunk, body) in rows {
+        // An unreadable chunk means that part of the list is missing;
+        // continuing with the rest is still useful, and reporting nothing would
+        // hide results that exist.
+        if let Some(c) = posting::Chunk::decode(&body) {
+            chunks.push(c);
         }
+    }
+    chunks.sort_by_key(|c| c.first_doc);
 
-        // Sort on the stored lower bound, not the key: it is the field the
-        // chunk codec actually relies on, and it survives any key encoding.
-        chunks.sort_by_key(|c| c.first_doc);
-
-        let mut out = Vec::new();
-        for c in chunks {
-            out.extend(c.postings);
-        }
-        Ok(out)
-    })
+    let mut out = Vec::new();
+    for c in chunks {
+        out.extend(c.postings);
+    }
+    Ok(out)
 }
 
 /// Union of the postings of several terms.
@@ -429,18 +417,9 @@ pub fn hit_snippet(
     // than silently wrapping to another book.
     let book_id = u16::try_from(doc_id).ok()?;
     let text = texts(doc_id, hit.entry_idx)?;
-    let map: EntryMap = engine
-        .read(
-            |txn| match txn.open_table(crate::storage::entrymap_table()) {
-                Ok(t) => match t.get((book_id, hit.entry_idx))? {
-                    Some(v) => Ok(Some(EntryMap::decode(v.value())?)),
-                    None => Ok(None),
-                },
-                Err(_) => Ok(None),
-            },
-        )
-        .ok()
-        .flatten()?;
+    // `?` then a `let-else`: the accessor is fallible, but a missing row is the
+    // common case and not an error, so it becomes `None` rather than propagating.
+    let map = engine.entry_map(book_id, hit.entry_idx).ok()??;
 
     let (pos, byte_off) = map.checkpoint_for(hit.first_position);
     let off = locate(&text, pos, byte_off, hit.first_position)?;
@@ -452,25 +431,12 @@ mod tests {
     use super::*;
     use crate::index::dict;
     use crate::tokenize::for_each_token_spanned;
-    use redb::ReadableTable;
 
     /// Rows in `POSTINGS` for one term.
     fn chunk_rows(engine: &Engine, term: &[u8]) -> u32 {
         engine
-            .read(|txn| {
-                let t = match crate::storage::or_empty(txn.open_table(postings_table()))? {
-                    Some(t) => t,
-                    None => return Ok(0),
-                };
-                let mut n = 0u32;
-                for row in t.iter()? {
-                    let (k, _) = row?;
-                    if k.value().0 == term {
-                        n += 1;
-                    }
-                }
-                Ok(n)
-            })
+            .postings_term(term)
+            .map(|v| v.len() as u32)
             .unwrap_or(0)
     }
     use crate::storage::Engine;

@@ -12,7 +12,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use redb::ReadableTable;
 use turbosearch::format::{epub, mobi, plain, sniff};
 use turbosearch::index::{Dict, EntryMap, entrymap, query, writer};
 use turbosearch::storage::Engine;
@@ -53,7 +52,7 @@ fn library_files() -> Vec<std::path::PathBuf> {
 /// this helper drift apart, the tests are measuring the wrong thing.
 fn index_files(files: &[std::path::PathBuf]) -> Option<(Engine, Dict, tempfile::TempDir)> {
     let dir = tempfile::tempdir().ok()?;
-    let mut engine = Engine::open(dir.path().join("p.idx")).ok()?;
+    let engine = Engine::open(dir.path().join("p.idx")).ok()?;
     let mut dict = Dict::new();
     let mut w = writer::Writer::new(&engine).ok()?;
 
@@ -463,23 +462,24 @@ fn junk_extensions_are_never_opened() {
 
 /// Every `ENTRYMAP` row the index holds.
 fn all_maps(engine: &Engine) -> Vec<(u16, u16, EntryMap)> {
-    engine
-        .read(|txn| {
-            let t = match turbosearch::storage::or_empty(
-                txn.open_table(turbosearch::storage::entrymap_table()),
-            )? {
-                Some(t) => t,
-                None => return Ok(Vec::new()),
-            };
-            let mut out = Vec::new();
-            for row in t.iter()? {
-                let (k, v) = row?;
-                let (book, entry) = k.value();
-                out.push((book, entry, EntryMap::decode(v.value())?));
+    // Walk the books that have entry maps, then each section the book recorded.
+    // The engine has no "iterate every entry map" accessor, and adding one for a
+    // test would be API for its own sake.
+    let mut out = Vec::new();
+    for book in engine.books_with_entry_maps().unwrap_or_default() {
+        let count = engine
+            .book(book)
+            .ok()
+            .flatten()
+            .map(|b| b.entry_count)
+            .unwrap_or(0);
+        for entry in 0..count {
+            if let Ok(Some(m)) = turbosearch::index::writer::get_entry_map(engine, book, entry) {
+                out.push((book, entry, m));
             }
-            Ok(out)
-        })
-        .unwrap_or_default()
+        }
+    }
+    out
 }
 
 /// Loads the text an entry map's name refers back to.

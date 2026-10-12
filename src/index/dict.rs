@@ -14,8 +14,6 @@
 use crate::codec::front;
 use crate::storage::{Engine, RunResult};
 
-use redb::ReadableTable;
-
 /// The single key holding the dictionary blob.
 pub const DICT_KEY: &[u8] = b"dict";
 
@@ -299,18 +297,13 @@ fn successor(prefix: &[u8]) -> Option<Vec<u8>> {
 
 /// Reads the dictionary out of the engine, or an empty one when absent.
 pub fn load(engine: &Engine) -> LoadResult<Dict> {
-    engine.read(|txn| {
-        let table = crate::storage::dict_table();
-        match txn.open_table(table) {
-            Ok(t) => match t.get(DICT_KEY) {
-                Ok(Some(v)) => Dict::decode(v.value())
-                    .map_err(|e| crate::storage::RunError::Message(format!("dictionary: {e}"))),
-                _ => Ok(Dict::new()),
-            },
-            // Table not yet created: nothing indexed.
-            Err(_) => Ok(Dict::new()),
-        }
-    })
+    // No table-exists branch any more: the schema is created on open, so an
+    // empty dictionary means "nothing indexed", not "table missing".
+    match engine.dict_blob()? {
+        Some(b) => Dict::decode(&b)
+            .map_err(|e| crate::storage::RunError::Message(format!("dictionary: {e}"))),
+        None => Ok(Dict::new()),
+    }
 }
 
 /// The result of loading.
@@ -322,31 +315,12 @@ pub type DeltaRow = (Vec<u8>, u32, u32, u32);
 /// Writes the dictionary blob.
 pub fn store(engine: &Engine, dict: &Dict) -> RunResult<()> {
     let blob = dict.encode();
-    engine.write(|txn| {
-        let mut t = txn.open_table(crate::storage::dict_table())?;
-        t.insert(DICT_KEY, blob.as_slice())?;
-        Ok(())
-    })
+    engine.write_dict_blob(&blob)
 }
 
 /// Reads `DICT_DELTA`, for resuming a session that never merged.
 pub fn load_deltas(engine: &Engine) -> LoadResult<Vec<DeltaRow>> {
-    engine.read(|txn| {
-        let table = crate::storage::delta_table();
-        let t = match txn.open_table(table) {
-            Ok(t) => t,
-            Err(_) => return Ok(Vec::new()),
-        };
-        let mut out = Vec::new();
-        for row in t.iter()? {
-            let (term, value) = row?;
-            let (df, tf, chunks) = unpack_delta(value.value()).map_err(|_| {
-                crate::storage::RunError::Message("dictionary delta: truncated row".into())
-            })?;
-            out.push((term.value().to_vec(), df, tf, chunks));
-        }
-        Ok(out)
-    })
+    engine.list_deltas()
 }
 
 /// Writes `DICT_DELTA` for the terms a session touched.
@@ -354,29 +328,13 @@ pub fn load_deltas(engine: &Engine) -> LoadResult<Vec<DeltaRow>> {
 /// Overwritten wholesale on every close: a merge into `DICT` happens in the
 /// same call, so the rows are only needed by an *interrupted* session.
 pub fn store_deltas(engine: &Engine, rows: &[DeltaRow]) -> RunResult<()> {
-    let packed: Vec<(Vec<u8>, Vec<u8>)> = rows
-        .iter()
-        .map(|(t, df, tf, c)| (t.clone(), pack_delta(*df, *tf, *c)))
-        .collect();
-    engine.write(|txn| {
-        // A fresh session replaces the previous delta entirely.
-        let mut t = txn.open_table(crate::storage::delta_table())?;
-        t.retain(|_, _| false)?;
-        for (term, value) in &packed {
-            t.insert(term.as_slice(), value.as_slice())?;
-        }
-        Ok(())
-    })
+    engine.replace_deltas(rows)
 }
 
 /// Drops `DICT_DELTA`. Called after a successful merge, so a resumed session
 /// does not double-count the same chunks.
 pub fn clear_deltas(engine: &Engine) -> RunResult<()> {
-    engine.write(|txn| {
-        let mut t = txn.open_table(crate::storage::delta_table())?;
-        t.retain(|_, _| false)?;
-        Ok(())
-    })
+    engine.clear_deltas()
 }
 
 use crate::codec::vbyte;
