@@ -1125,13 +1125,27 @@ score(book) = w_meta × meta_hits × idf_meta     # title/author match — the s
 
 | Item | Decision |
 |---|---|
-| Artifact | `crate-type = ["cdylib"]` → `libturbosearch.so`, exporting only `extern "C"` functions + an opaque handle (`Box::into_raw`) |
+| Artifact | `crate-type = ["cdylib", "rlib"]` → `libturbosearch.so`, exporting only `extern "C"` functions + an opaque handle (`Box::into_raw`). `rlib` giữ lại để test nội bộ vẫn build cùng crate |
 | Cross-compile | target `armv7-unknown-linux-gnueabihf`, **same toolchain/glibc as koreader-base** (hard-float, NEON). Do not hard-code `-C target-cpu=cortex-a9` so it can still run on other devices |
-| Lua side | `ffi.cdef` + `ffi.load("/mnt/us/koreader/search/libturbosearch.so")` |
+| Build tool | `cargo zigbuild` (zig cc), không dùng gcc arm riêng — xem §5.1 |
+| Lua side | Teal (`tl/*.tl`) biên dịch ra Lua thuần; `ffi.cdef` + `ffi.load(...)`. Xem §5.1 |
 | Threading | Indexing runs in KOReader's background task; the FFI exposes `progress()`. **Never block the UI thread** |
-| DB location | `/mnt/us/koreader/search/turbosearch.redb` |
-| Crash safety | redb has WAL/ACID → a power loss will not corrupt the DB, losing at most 1 book (§3.1) |
-| ABI check | the `so` checks `schema_version` at load; mismatch → return a "rebuild needed" error, no crash |
+| DB location | `/mnt/us/koreader/search/turbosearch.db` (SQLite, xem §2) |
+| Crash safety | SQLite có WAL/ACID → mất điện không hỏng DB, tối đa mất 1 book (§3.1) |
+| ABI check | `ts_version()` lúc mở; lệch phiên bản → trả lỗi "rebuild needed", không crash |
+| Error contract | Mọi entry point FFI chạy trong `catch_unwind`; panic được báo qua `ts_last_error` chứ **không** được unwind vào stack LuaJIT (sẽ abort process). Vì vậy `Cargo.toml` **không** đặt `panic = "abort"` — đã thử nghiệm chứng minh: với `abort`, `catch_unwind` không bắt được panic và process chết SIGABRT |
+
+### 5.1. Teal & cross-compile
+
+**Teal.** Plugin KOReader là Lua, nên phần Lua viết bằng Teal: Lua có kiểu tĩnh, biên dịch ra Lua thuần chạy được trong LuaJIT của reader, còn lỗi kiểu bị bắt ngay lúc build thay vì trên tay người dùng.
+
+- Nguồn: `tl/*.tl`. Build artifact: `turbosearch.lua` (gitignored).
+- `script/tl` cài compiler phát hành pinned (`0.24.8`) + sha256 vào `~/.cache/turbosearch/`: repo chứa công thức, máy chứa binary — và checkout thứ hai không vô tình build bằng compiler khác.
+- `script/lua-check` type-check.
+- `tl/ffi.tl` khai báo slice của `require("ffi")` mà engine dùng, vì `tl check` trên plain Lua không thấy `ffi` (chỉ LuaJIT có) và sẽ báo `module not found` rồi fail ở mọi chỗ dùng — một kiểm tra không thể fail vì lý do thật.
+- Lỗi thường gặp đã xử lý: `export` không tồn tại trong Teal 0.24 (dùng `local record` + trả trong module table); `ffi.C` **không** mang symbol của library do `ffi.load` nạp (nó chỉ tìm trong executable và dependency — `load_lib` phải rebind `C` vào handle vừa load); Teal không có type `cdata` nên con trỏ khai báo `any`.
+
+**Cross-compile.** Máy dev là x86-64 nhưng Kindle PW3 là armv7, nên cần **hai** bản `.so`: x86-64 test tại chỗ (KOReader desktop ở `/usr/lib/koreader`), armv7 lên máy đọc. Không có `arm-linux-gnueabihf-gcc`, dùng `cargo zigbuild --target armv7-unknown-linux-gnueabihf`.
 
 Crates:
 ```

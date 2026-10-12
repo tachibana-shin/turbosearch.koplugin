@@ -2,7 +2,7 @@
 --
 -- The engine is a C shared library loaded through LuaJIT's FFI. Every entry
 -- point is declared here in one place, so the rest of the plugin works with
--- records and strings rather than raw pointers. See `note.md` section 8 for
+-- records and strings rather than raw pointers. See `note.md` section 5 for
 -- why this is the delivery method: a KOReader plugin is Lua, and LuaJIT calls
 -- C directly.
 --
@@ -71,8 +71,8 @@ local record Handle
    ptr: any
 end
 
---- The loaded library, or nil before `load_lib` runs.
-local lib: any = nil
+--- True once `load_lib` has run.
+local loaded: boolean = false
 local C = ffi.C
 
 ------------------------------------------------------------
@@ -107,18 +107,18 @@ local MODE_FILE_LIST: integer = 2
 --- `(boolean, string)` — needs `pcall`, whose polymorphic multi-value return
 --- Teal cannot type, which would cost more than it gives.
 local function load_lib(path: string)
-   lib = ffi.load(path)
-   C = lib
+   C = ffi.load(path)
+   loaded = true
 end
 
 --- True once a library has been loaded.
 local function is_loaded(): boolean
-   return lib ~= nil
+   return loaded
 end
 
 --- The version string of the loaded engine, or nil.
 local function version(): string
-   if lib == nil then
+   if not loaded then
       return nil
    end
    local s: any = C.ts_version()
@@ -134,7 +134,7 @@ end
 
 --- The last error the engine reported, as a Lua string.
 local function last_error(): string
-   if lib == nil then
+   if not loaded then
       return "engine not loaded"
    end
    local s: any = C.ts_last_error()
@@ -146,7 +146,7 @@ end
 
 --- Opens an index at `path`.
 local function open_index(path: string): Handle
-   if lib == nil then
+   if not loaded then
       error("engine not loaded; call load_lib() first")
    end
    local ptr: any = C.ts_open(path)

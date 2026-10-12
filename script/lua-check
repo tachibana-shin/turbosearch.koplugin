@@ -1,0 +1,12 @@
+#!/bin/bash
+# Type-checks the Teal sources.
+#
+# `tl check` cannot find `require("ffi")` on its own — ffi only exists under
+# LuaJIT — so tl/ffi.tl declares the slice of it the engine uses and this script
+# points Teal at that directory. The result is a check that fails on a real
+# mistake, such as a call into the C ABI that src/ffi.rs no longer provides,
+# instead of on every use of ffi.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+./script/tl check --include-dir tl tl/*.tl

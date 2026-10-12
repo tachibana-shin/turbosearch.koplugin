@@ -1,0 +1,33 @@
+#!/bin/bash
+# The Teal compiler, pinned and fetched on demand.
+#
+# The Lua side of the project is written in Teal (tl/*.tl), which compiles to
+# the plain Lua that KOReader loads. Rather than vendor a 467 KB binary in git,
+# this pins a version and its sha256 and caches it under XDG_CACHE_HOME: the
+# repository carries the recipe, the machine carries the binary. That also keeps
+# a second checkout from happily compiling against a different compiler than the
+# one that produced the last commit.
+#
+# Usage: script/tl <any tl arguments, e.g. `check tl/turbosearch.tl`>
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+TL_VERSION="0.24.8"
+TL_SHA256="84630ccdcd6c6380eb4fb8a36e44d594b7b5cc306c54ba8d8f5806e9d1e28566"
+TL_BASE="https://github.com/teal-language/tl/releases/download/v${TL_VERSION}"
+
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/turbosearch/tl-${TL_VERSION}"
+EXTRACTED="$CACHE/tl-${TL_VERSION}-linux-x86_64"
+TL="$EXTRACTED/tl"
+
+if [ ! -x "$TL" ]; then
+    mkdir -p "$CACHE"
+    TARBALL="$CACHE/tl.tar.gz"
+    echo "script/tl: fetching tl ${TL_VERSION} into $CACHE" >&2
+    curl -sSL --fail -o "$TARBALL" "$TL_BASE/tl-${TL_VERSION}-linux-x86_64.tar.gz"
+    echo "$TL_SHA256  $TARBALL" | sha256sum -c - >&2
+    tar -xzf "$TARBALL" -C "$CACHE"
+    rm -f "$TARBALL"
+fi
+
+exec "$TL" "$@"
