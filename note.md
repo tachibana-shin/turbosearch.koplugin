@@ -619,14 +619,25 @@ Measured on the reference library (614 EPUB, 303,6 MB of text, 49,9 M tokens):
 
 | Mode | Database | Full build |
 |---|---|---|
-| `FileList` | **0,9 MB** | 28 s |
-| `TermsOnly` | **31,8 MB** (10,5% of text) | ~110 s |
-| `Full` | **163 MB** | ~190 s |
+| `FileList` | **0,9 MB** | **15 s** |
+| `TermsOnly` | **31,8 MB** (10,5% of text) | **97 s** |
+| `Full` | **163 MB** | **114 s** |
 
-Both timings are extrapolated from a 200-book A/B, and the extrapolation is
-conservative in a way that favours the old numbers: the two fixes below scale
-with library size, so the saving grows rather than holds. `FileList` and every
-size are measured directly.
+Measured on the whole library (619 books, 614 EPUB + 5 MOBI, 12 409 sections,
+303,6 MB of text, 49,9 M tokens), not extrapolated. The `Full` figure is the
+same 163 086 336 bytes every run in this commit series produced, which is the
+stability check on the whole path.
+
+| | `Full` | `TermsOnly` | `FileList` |
+|---|---|---|---|
+| Phrase `"thám tử"` | 235 hits, 32 ms | 33 hits, 3,9 ms | — |
+| Any-term `"thám tử"` | 513 hits, 31 ms | 513 hits, 3,0 ms | — |
+| Metadata `"higashino"` | 13 results | 13 results | 13 results |
+| Rescan, nothing changed | **3,8 s, 619 unchanged** | same | same |
+
+The rescan row is the one that matters for a device: 619 fingerprints compared
+and nothing written, in under four seconds. Every row above is reproduced by
+`bin/indexer` with `CONTENT_MODE` set.
 
 > The two content timings above are extrapolated from a 200-book A/B after the
 > indexer stopped tokenizing every section twice. The `FileList` figure and every
