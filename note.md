@@ -19,335 +19,334 @@ lib.rs
 //! the `turbosearch` binary is a thin CLI over the same code.
 ```
 
-# TURBOSEARCH — ĐẶC TẢ KỸ THUẬT v4
+# TURBOSEARCH — TECHNICAL SPECIFICATION v4
 
-**Full-Text Search Engine (phrase + prefix) cho KOReader trên Kindle Paperwhite 3, viết bằng Rust.**
+**Full-Text Search Engine (phrase + prefix) for KOReader on Kindle Paperwhite 3, written in Rust.**
 
-> Tài liệu này thay thế hoàn toàn bản v1 ở Phụ lục cuối file.
-> v2 thêm: quyết định Q1 (phương án a), lol-html, spine order, không tái sử dụng book_id.
-> v3 thêm: **quy ước English-only cho code** (§1.3) và **chiến lược nén tối đa** (§3.4).
-> v4 thêm: **index metadata sách** (§2.3, §3.2) và **đa định dạng + cấu hình đuôi file** (§3.0, §3.5).
-> Các thay đổi được liệt kê ở §0.
+> This document completely supersedes v1 in the appendix at the end of the file.
+> v2 added: decision Q1 (option a), lol-html, spine order, no `book_id` reuse.
+> v3 added: the **English-only convention for code** (§1.3) and the **maximum compression strategy** (§3.4).
+> v4 added: **book metadata indexing** (§2.3, §3.2) and **multi-format support + file extension configuration** (§3.0, §3.5).
+> All changes are listed in §0.
 
 ---
 
-## 0. Nhật ký thay đổi
+## 0. Change log
 
 ### v1 → v2
 
-| # | v1 | v2 | Lý do |
+| # | v1 | v2 | Reason |
 |---|---|---|---|
-| 1 | DB < 3% thư viện (~50MB / 2.5GB) | **Chấp nhận ~20–25%** + ngân sách đĩa (§1.2) | Không thể đạt 3% với positional index — §1.1 |
-| 2 | State machine tự viết (InTag/InText) | **`lol-html` duy nhất** | `>` trong attribute, `<!-- -->`, CDATA, entity, UTF-16 làm lệch position và đưa rác vào index |
-| 3 | Đọc entry ZIP theo thứ tự `read_dir` | Đọc theo **OPF `<spine>`** | Position phải khớp thứ tự đọc, nếu không snippet hiện sai chỗ |
-| 4 | Lọc stopwords | **Index toàn bộ từ**; cap mềm 100K pos/(sách, từ) | Đã chấp nhận size lớn → adjacency chính xác (= 1), cụm "the girl with…" khớp đúng |
-| 5 | Xóa sách = dọn posting cũ | **Không tái sử dụng `book_id`**; posting mồ côi discard khi query; compact định kỳ | Xóa 1 sách không phải quét 600M posting → O(1) |
-| 6 | Delta + VByte | PForDelta (sau đó nâng lên §3.4 v3) | Nén tốt hơn, decode nhanh hơn ~2–4× trên Cortex-A9 |
-| 7 | `inode + mtime + size`, check dir bằng mtime | `path + size + mtime`; `inode` chỉ là hint; **bỏ** check dir-mtime | `/mnt/us` trên Kindle là **vfat**: inode không ổn định, mtime chỉ có độ phân giải **2 giây** |
-| 8 | Trả về "vị trí byte/từ", `seek()` vào file thô | `entry_idx + byte_off` + `ANCHORS`; xpointer **lazy**; snippet decode bằng `lol-html` | KOReader mở sách bằng `Locator`; `seek()` vào HTML thô sẽ lộ tag |
-| 9 | Tokenizer tách theo khoảng trắng | **Fold diacritics (NFD → strip combining marks)** + **bigram cho CJK** | "tham tu" phải ra "thám tử"; tiếng Trung/Nhật không có space |
-| 10 | Không có | **Prefix search** (range-scan dictionary) + **ranking tf×idf** | UX bàn phím e-ink; thứ tự `book_id` là vô nghĩa |
-| 11 | Không đề cập | **Resume**: cursor + 1 transaction/sách | PW3 pin yếu, index lần đầu 10–30 phút |
-| 12 | Chỉ nói EPUB | Scope rõ: **EPUB/TXT/FB2** phase 1, **MOBI/AZW3** phase 2, **KFX/CBZ/DJVU/PDF/DOCX không index** | Thư viện Kindle có nhiều AZW3 |
-| 13 | Không có | `META` chứa schema/tokenizer/normalizer version + `config_hash` | Đổi 1 dòng normalize là toàn bộ index cũ thành rác vĩnh viễn |
-| 14 | Không đề cập | `cdylib` + C ABI, load bằng LuaJIT FFI, cross-compile `armhf` (§5) | KOReader là LuaJIT + C |
-| 15 | Không đề cập | Cap entry / tổng size giải nén / kiểm tra free space | EPUB là input không tin cậy (zip bomb); đầy đĩa làm hỏng máy |
+| 1 | DB < 3% of the library (~50MB / 2.5GB) | **Accept ~20–25%** + disk budget (§1.2) | 3% is unreachable with a positional index — §1.1 |
+| 2 | Hand-written state machine (InTag/InText) | **`lol-html` only** | `>` inside attributes, `<!-- -->`, CDATA, entities, UTF-16 shift positions and inject garbage into the index |
+| 3 | Read ZIP entries in `read_dir` order | Read in **OPF `<spine>`** order | Positions must match reading order, otherwise snippets show up in the wrong place |
+| 4 | Stopword filtering | **Index every word**; soft cap of 100K pos/(book, term) | A larger size is already accepted → exact adjacency (= 1), phrases like "the girl with…" match correctly |
+| 5 | Deleting a book = cleaning up old postings | **No `book_id` reuse**; orphan postings discarded at query time; periodic compaction | Deleting one book must not scan 600M postings → O(1) |
+| 6 | Delta + VByte | PForDelta (later upgraded in §3.4 v3) | Better compression, ~2–4× faster decode on Cortex-A9 |
+| 7 | `inode + mtime + size`, dir check via mtime | `path + size + mtime`; `inode` is only a hint; **drop** the dir-mtime check | `/mnt/us` on Kindle is **vfat**: inodes are not stable and mtime has only **2-second** resolution |
+| 8 | Return "byte/word position", `seek()` into the raw file | `entry_idx + byte_off` + `ANCHORS`; xpointer **lazy**; snippet decoded with `lol-html` | KOReader opens books via `Locator`; `seek()` into raw HTML would expose tags |
+| 9 | Whitespace-splitting tokenizer | **Fold diacritics (NFD → strip combining marks)** + **bigram for CJK** | "tham tu" must produce "thám tử"; Chinese/Japanese have no spaces |
+| 10 | None | **Prefix search** (dictionary range scan) + **tf×idf ranking** | E-ink keyboard UX; `book_id` ordering is meaningless |
+| 11 | Not mentioned | **Resume**: cursor + 1 transaction per book | PW3 has weak battery; the initial index takes 10–30 minutes |
+| 12 | EPUB only | Clear scope: **EPUB/TXT/FB2** phase 1, **MOBI/AZW3** phase 2, **KFX/CBZ/DJVU/PDF/DOCX not indexed** | Kindle libraries contain many AZW3 files |
+| 13 | None | `META` holds the schema/tokenizer/normalizer version + `config_hash` | Changing one normalization line turns the entire old index into permanent garbage |
+| 14 | Not mentioned | `cdylib` + C ABI, loaded via LuaJIT FFI, cross-compile `armhf` (§5) | KOReader is LuaJIT + C |
+| 15 | None | Cap on entries / total uncompressed size / free space check | EPUB is untrusted input (zip bomb); a full disk damages the device |
 
-### v2 → v3 (bản cập nhật này)
+### v2 → v3 (this update)
 
-| # | v2 | v3 | Lý do / Tiết kiệm |
+| # | v2 | v3 | Reason / Savings |
 |---|---|---|---|
-| 16 | Không quy định | **English-only cho toàn bộ code, comment, log, error, test name, commit** (§1.3) | Lỗi hiện ra log của KOReader phải grep được; rustc/clippy/rustdoc đều English; sẵn sàng cho contributor ngoài |
-| 17 | "redb nén được" (ngầm định) | **redb 2.x KHÔNG có nén native** — đã kiểm tra tài liệu: `Builder` chỉ có `set_cache_size`, `set_page_size`, `set_repair_callback`, `set_region_size`. Toàn bộ nén phải tự làm (§3.4 L5) | Né bẫy: đợi redb nén giúp = index toàn bộ không nén |
-| 18 | Posting chứa `byte_off: u32` | **Bỏ `byte_off` khỏi posting**; thay bằng `ENTRYMAP.checkpoints` — mảng `(pos, byte_off)` thưa mỗi 2048 position (§3.4 L1) | **~15–20%** — đây là field có entropy cao nhất trong posting |
-| 19 | `TERMS` = 1 KV cho mỗi term (~1M KV) | **`DICT` = 1 KV duy nhất**, front-coded + zstd, chứa cả df/tf/chunk_count; `DICT_DELTA` cho session đang chạy (§3.4 L4) | **~30–50MB** overhead B-tree/page + prefix search thành binary search trong RAM |
-| 20 | PForDelta 4 cột | **Elias-Fano** (doc gap) + **Binary Interpolative Coding** (pos gap) + **RLE** (entry_idx), rồi **zstd-19 + trained dictionary** lên trên (§3.4 L2–L3) | **~10–20%** so với PForDelta |
+| 16 | Not specified | **English-only for all code, comments, logs, errors, test names, commits** (§1.3) | Errors surfacing in KOReader logs must be greppable; rustc/clippy/rustdoc are all English; ready for external contributors |
+| 17 | "redb can compress" (implicit) | **redb 2.x has NO native compression** — verified in the docs: `Builder` only has `set_cache_size`, `set_page_size`, `set_repair_callback`, `set_region_size`. All compression must be implemented ourselves (§3.4 L5) | Avoid the trap: waiting for redb to compress = an entirely uncompressed index |
+| 18 | Postings contain `byte_off: u32` | **Drop `byte_off` from postings**; replace it with `ENTRYMAP.checkpoints` — a sparse `(pos, byte_off)` array every 2048 positions (§3.4 L1) | **~15–20%** — this is the highest-entropy field in a posting |
+| 19 | `TERMS` = one KV per term (~1M KVs) | **`DICT` = a single KV**, front-coded + zstd, also holding df/tf/chunk_count; `DICT_DELTA` for the running session (§3.4 L4) | **~30–50MB** of B-tree/page overhead + prefix search becomes a binary search in RAM |
+| 20 | PForDelta with 4 columns | **Elias-Fano** (doc gap) + **Binary Interpolative Coding** (pos gap) + **RLE** (entry_idx), then **zstd-19 + trained dictionary** on top (§3.4 L2–L3) | **~10–20%** vs PForDelta |
 
-### v3 → v4 (bản cập nhật này)
+### v3 → v4 (this update)
 
-| # | v3 | v4 | Lý do |
+| # | v3 | v4 | Reason |
 |---|---|---|---|
-| 21 | Chỉ index nội dung sách | **Index cả metadata sách** (title, author, series, tags, publisher, description…) qua bảng `METADATA` + `METAIDX` (§2.3, §3.2) | Người dùng tìm sách theo tên/tác giả/thể loại, không chỉ theo nội dung |
-| 22 | Chỉ hỗ trợ EPUB (TXT/FB2/AZW3 để phase 2) | **Đa định dạng ngay phase 1**: EPUB/KEPUB, MOBI/AZW/AZW3, TXT/MD, HTML/XHTML, FB2 (+`.fb2.zip`) | Thư viện Kindle thật chứa nhiều `.azw3`/`.mobi`; bỏ qua = bỏ qua phần lớn sách |
-| 23 | Không có | **Cấu hình được**: `include_extensions` / `exclude_extensions` / `exclude_dir_globs` / `source_dirs` (§3.5) | Người dùng tự thêm đuôi muốn quét, tự loại trừ đuôi rác |
-| 24 | Không có | **Nhận diện format bằng magic byte**, extension chỉ là pre-filter nhanh (§3.0) | `.az`/`.azw`/`.azw3`/`.kfx` đặt tên lộn xộn trong thực tế; file đổi tên cũng phải index đúng |
-| 25 | Snippet chỉ trích text sách | Match trong metadata → trả **thẻ metadata** (title/author/series) thay vì snippet | Kết quả tìm theo tên sách phải hiển thị thông tin sách, không phải một đoạn văn |
-| 26 | Không có | Bảng `CONFIG` lưu toàn bộ thiết lập người dùng; tách rõ option nào **làm thay đổi token stream** (→ rebuild) và nào **chỉ đổi tập file quét** (→ rescan) (§3.5.3) | Đổi config nhạy cảm mà không rebuild = index sai âm thầm |
-| 27 | `.az` coi là "giống EPUB" | **Đính chính**: MOBI/AZW/AZW3 là **PalmDB + PalmDOC LZ77**, *không* phải ZIP. Payload bên trong là HTML (giống EPUB), nhưng container khác hoàn toàn (§3.0.2) | Viết parser sai container = không đọc được gì |
-| 28 | Query chỉ khớp term đầy đủ | **Fallback prefix expansion** (§4.1.1): term không có trong `DICT` thì mở rộng thành prefix | Gõ `cha` không ra `chai` — trên bàn phím PW3 thì gõ từ một phần là hành vi chủ đạo, không phải edge case |
-| 29 | Không có | `prefix_search_mode` (`auto`/`exact`/`prefix`) + đánh dấu `fuzzy` + hiển thị cho user biết từ đã bị mở rộng | Không báo thì user không hiểu sao gõ `cha` lại ra sách không có chữ "cha" |
-| 30 | Mọi con số kích thước đều là ước tính (±50%) | **Số đo thật trên 614 EPUB** (§1.1.1): 1,36GB EPUB → 348,7MB text → 56,3M token → **index full positional 102,9MB (7,6% EPUB)** | Gate §7.7 đã chạy. Suy rời cũ thổi phồng ~5,8× do đoán sai mật độ token/thư viện |
-| 31 | Kiến trúc đề xuất "2 tầng + xác minh" vì sợ index quá lớn | **Không cần thiết** — full positional chỉ 102,9MB. Chỉ cần khi thư viện > ~3,5GB | Không thêm phức tạp khi số đo cho thấy không cần |
-| 32 | `zstd-19` cho đường build | **`zstd` level 3** (§3.4 L3): 6,5s vs 512s trên 348,7MB, chỉ nhỏ hơn 32% | Level 19 trên Cortex-A9 mất 1,5–3 giờ mỗi lần build |
-| 33 | redb "2.x" | **redb 4.3.0** (đã kiểm tra API): `Builder::set_cache_size()`, key/value cho `(&[u8], u16)`, **không có nén native** | Crate đã lên 4.x; `set_cache_size` chỉ có trên `Builder`, `len()` chỉ có trên *untyped* table, `iter().next()` trả `Option<Result<..>>` |
-| 34 | "đọc bảng chưa tạo = lỗi" | **`TableDoesNotExist` = bảng rỗng**, xử lý tập trung ở `storage::or_empty()` | DB mới tạo hoặc user chưa bật indexing là trạng thái bình thường, không phải lỗi |
-| 35 | Scan một lần cho mọi root | **Hai chế độ: `scan_scope(dir)` và `scan_full(config)`**, `ScanMode::{Scope,Full}` (§3.1.1) | User gõ search khi đang mở thư mục con → index đúng thư mục đó (vài giây), không quét cả thư viện (vài phút) |
-| 36 | Search luôn trên toàn bộ DB | **`ScopeFilter(dir)`** giới hạn kết quả theo path prefix | Search ở thư mục con không được lẫn sách của thư mục khác |
-| 37 | Sách `missing` xét trên toàn bộ DB | Chỉ xét sách nằm dưới root **đọc được trong lượt này** | Không guard này thì full scan 1 root sẽ xóa sạch sách đã scope-index ở root khác |
-| 38 | Dùng crate `mobi` 0.8.0 phân tích MOBI | **Tạm bỏ qua MOBI/AZW/AZW3** | Crate `mobi` (duy nhất) không cập nhật từ 2022-12, phụ thuộc `encoding` 0.2 (đã bị bỏ rơi), doc coverage 21,9%, `content_as_string()` trả 1 String → **mất byte offset** mà `ENTRYMAP.checkpoints` cần. Chỉ 5/614 cuốn (0,8%) |
-| 39 | Sniff đọc 64 byte đầu | Đọc **128 byte** | Magic `BOOKMOBI` nằm ở offset 60..68 — đọc 64 byte sẽ cắt đôi magic và mọi MOBI thành `Unknown` |
-| 40 | So `<!doctype html` theo hằng byte | So **không phân biệt hoa thường** | `<!DOCTYPE html>` là chuẩn nhưng file thật có `<!Doctype Html>`, `<!doctype html>` |
-| 41 | Chỉ parse `Event::Start` | Parse cả `Event::Start` **và** `Event::Empty` | `<item/>` và `<itemref/>` trong OPF là **self-closing** → chỉ parse `Start` thì **spine rỗng hoàn toàn**, mọi EPUB mất thứ tự đọc |
-| 42 | Lấy text bằng handler `text!("body")` | Dùng handler `element!("*")` + `remove_and_keep_content()` | Handler `text!` cũng bắt text **bên trong** `<script>` (là con của `body`) → rò rỉ JS vào index |
-| 43 | `&` không có `;` thì giữ tối đa 32 byte | State machine 3 trạng thái: `Complete` / `NotEntity` / `Truncated` | `Tom & Jerry` có `&` rồi gặp space → phải giữ lại literal ngay, không thì 1 dấu `&` nuốt 32 byte |
-| 44 | Tin `media-type` của manifest để biết entry nào là nội dung | **Tin đuôi file**: `.xhtml`, `.html`, `.htm`, `.xhtm` (§3.2) | `media-type` hay bị thiếu hoặc ghi sai trong EPUB thật; đuôi file trong `href` thì luôn có |
-| 45 | So tên element/attribute OPF **phân biệt hoa thường** | `local_name()` và `attr_value()` so **`eq_ignore_ascii_case`** | HTML/XHTML không bắt buộc hoa hay thường — `<Title>`, `<ItemRef>`, `<OPF:SCHEME>`, `IDREF` là hợp lệ |
-| 46 | Tra entry ZIP **phân biệt hoa thường** | `read_entry` fallback quét case-insensitive | href `ChapterOne.XHTML` không khớp entry `chapterone.xhtml` → section bị bỏ **âm thầm** |
-| 47 | `<?xml`, `<![CDATA[` phân biệt hoa thường | `eq_ignore_ascii_case` | File thật có `<?XML`, `<![cdata[` |
-| 48 | Không có module tokenize — whitespace còn nguyên trong text | Module `tokenize` với `for_each_token()` (§3.2.1) | `\r`, `\n`, `\t`, nbsp đều phải là dấu tách; trước đó chúng còn nằm trong `Section.text` |
-| 49 | Chỉ NFD + bỏ combining mark | Thêm fold tay `đ`/`Đ` → `d` | `đ` (U+0111) là chữ cái riêng, NFD **không** tách — không fold thì gõ `duoc` không ra `được` |
-| 50 | `is_alphanumeric()` cho chữ+ số chung một run | Chữ và số tách nhau | `Chapter12` phải ra `chapter` + `12` để tìm `3` ra `Tập 3` |
-| 51 | Fold dấu một chiều → preview mất | `for_each_token_spanned()` trả byte range trong **text gốc** (§3.2.3) | `OffsetMap` map ngược từ byte đã normalize về byte gốc |
-| 52 | `src` cộng theo char trong lúc NFD | Cộng theo **char gốc**, mọi byte sinh ra từ char đó map chung về `char_start` | Span rơi vào giữa ký tự → slice panic. NFD của U+1EE7 cho ra 3 char, cộng dồn đỗ ra byte 57 giữa chữ `ủ` |
-| 53 | **Flush postings sau mỗi book** → 1 chunk cho mỗi (term, book) | Tích lũy **xuyên book**, chỉ ghi khi pool vượt `MAX_PENDING` (4M posting) | Thư viện thật: 743.587 chunk / 62.663 term → output 492MB. Sau fix: **71.619 chunk** — vừa đủ để mỗi term đạt đúng `CHUNK_POSTINGS` |
-| 54 | Khởi tượng không biết redb giữ free page | `Engine::compact()` sau session đã đóng writer | Đo thật: file mới ghi 293MB nhưng **dữ liệu thô chỉ 91,5MB** → 69% là trang rác. Compact là bắt buộc, không phải tùy chọn |
-| 55 | Đọc chunk theo thứ tự **key** | Sắp xếp theo `Chunk.first_doc` đã giải mã | Key `(term, chunk_idx: u16)` — redb mã hoá u16 **big-endian**, nên term >256 chunk iterate sai thứ tự (chunk 256 đứng trước chunk 1) → position lùi, phrase query **mất hit âm thầm**. Bắt bởi test thư viện thật |
-| 56 | Restart position 0 cho **mỗi section** | Một bộ đếm xuyên suốt cả book, `entry_idx` phân biệt section | `pos_gap` là delta: reset mỗi section làm position **trùng lặp** trong cùng document → underflow → chunk decode hỏng. Triệu chứng: search trả 0 hit toàn bộ |
-| 57 | PalmDOC tự viết sai 3 quy tắc | `0x01..=0x08` = đếm N literal từ stream (không lặp ký tự trước); `0x80..=0xBF` item 14-bit = `((b&0x3F)<<8)\|next` → dist `item>>3`, len `(item&7)+3`; `0xC0..=0xFF` ra `' ' + (b^0x80)` | Bị bắt nhờ hexdump file thật: `0xEF` → `" o"`, `0xC3` → `" C"`. Verify: cả 5 file MOBI decode sạch, tiếng Việt đúng dấu |
-| 58 | Indexer không ghi `BOOKS` | Ghi `BOOKS` cho mọi book cùng lúc với metadata | `rebuild_index()` chỉ gồm book có `BOOKS` sống → thiếu row là metadata **biến mất âm thầm** khỏi mọi metadata search. Phải gán cùng book_id cho postings và metadata |
-| 59 | MOBI không có đường metadata | `from_embedded()` đọc EXTH cho Mobi/Azw/Azw3 qua `format::mobi` | User yêu cầu index metadata mọi định dạng; text không cần giải nén cũng lấy được title/authors |
-| 53 | `.nfd()` áp lên toàn chuỗi | NFD **theo từng char**, và **miễn trừ Hangul syllable** | Hangul decompose thành jamo (không phải combining mark) → `한국어` rách, và NFKC per-char không tái hợp được |
-| 54 | Định bỏ position vì "preview vẫn phải lục lại epub" | **Giữ position chính xác** (§3.4 L1.2) | Lục lại là **seek** chứ không quét: 3ms (1 section) vs 18ms (cả cuốn). Không có position thì tìm "tham tu" phải extract mọi sách ứng viên ≈ 9 giây |
-| 55 | Span có thể rơi giữa ký tự đa byte | Test `real_book_slices_are_always_on_char_boundaries` trên 40 cuốn thật | Unit test không tái hiện được; chỉ xuất hiện trên text thật |
-| 56 | `remove_book` chỉ xóa `BOOKS` + `PATHS` | Xóa thêm row `METADATA`, và `rebuild_index` chỉ lấy id còn trong `BOOKS` | `METAIDX` rebuild từ row `METADATA` → row sót lại làm sách đã xóa **sống lại trong mọi lần search metadata, vĩnh viễn**. Postings thì orphan bị lọc khi đọc được, metadata thì không |
-| 57 | `MetaIndex::push` đòi caller normalize | `push` và `search` **tự normalize** | Quên một lần → index âm thầm không khớp gì, không có lỗi báo |
-| 58 | `sequence` FB2 là `Event::Empty` | Gộp `Start | Empty` (lần thứ 2 của cùng một lỗi) | Lỗi lặp lần 3 sau OPF `itemref`/`item`: self-closing element bị bỏ hoàn toàn, lần này mất **mọi series của FB2** |
-| 59 | Tin `media-type` để biết entry nào là nội dung | **Tin đuôi file** (§3.2.2) | `media-type` hay thiếu hoặc sai trong EPUB thật; `href` thì luôn có |
-| 60 | Element/attribute OPF phân biệt hoa thường | `eq_ignore_ascii_case` | `<Title>`, `<ItemRef>`, `OPF:SCHEME`, `IDREF` là hợp lệ → mất metadata + mất spine |
-| 61 | Preview lấy span của token cuối | Nhớ `candidate_start` từ token đầu | `push()` hoàn tất match chỉ nhận span của token **cuối** → preview ra `"tử"` thay vì `"thám tử"` |
+| 21 | Index book content only | **Index book metadata too** (title, author, series, tags, publisher, description…) via the `METADATA` + `METAIDX` tables (§2.3, §3.2) | Users look for books by name/author/genre, not only by content |
+| 22 | EPUB support only (TXT/FB2/AZW3 deferred to phase 2) | **Multi-format from phase 1**: EPUB/KEPUB, MOBI/AZW/AZW3, TXT/MD, HTML/XHTML, FB2 (+`.fb2.zip`) | Real Kindle libraries hold many `.azw3`/`.mobi` files; skipping them means skipping most books |
+| 23 | None | **Configurable**: `include_extensions` / `exclude_extensions` / `exclude_dir_globs` / `source_dirs` (§3.5) | Users add the extensions they want scanned and exclude junk extensions themselves |
+| 24 | None | **Format detection by magic byte**, the extension is only a fast pre-filter (§3.0) | `.az`/`.azw`/`.azw3`/`.kfx` are named haphazardly in practice; renamed files must still be indexed correctly |
+| 25 | Snippets extract book text only | A match in metadata returns a **metadata tag** (title/author/series) instead of a snippet | Results of a title search must show book information, not a paragraph of text |
+| 26 | None | A `CONFIG` table stores all user settings; clearly separate the options that **change the token stream** (→ rebuild) from those that **only change the set of files scanned** (→ rescan) (§3.5.3) | Changing a sensitive config without rebuilding = a silently wrong index |
+| 27 | `.az` treated as "like EPUB" | **Correction**: MOBI/AZW/AZW3 is **PalmDB + PalmDOC LZ77**, *not* ZIP. The payload inside is HTML (as in EPUB), but the container is completely different (§3.0.2) | Writing a parser for the wrong container = nothing can be read |
+| 28 | Queries match full terms only | **Fallback prefix expansion** (§4.1.1): a term absent from `DICT` is expanded into a prefix | Typing `cha` and not getting `chai` — on a PW3 keyboard, typing part of a word is the dominant behavior, not an edge case |
+| 29 | None | `prefix_search_mode` (`auto`/`exact`/`prefix`) + a `fuzzy` flag + surfacing to the user that the term was expanded | Without that signal the user cannot understand why typing `cha` returns books that do not contain the string "cha" |
+| 30 | All size figures are estimates (±50%) | **Real measurements on 614 EPUBs** (§1.1.1): 1,36GB EPUB → 348,7MB text → 56,3M token → **full positional index 102,9MB (7,6% EPUB)** | Gate §7.7 has run. The old crude extrapolation inflated by ~5,8× because it guessed token/library density wrong |
+| 31 | The proposed "2 tiers + verification" architecture out of fear the index would be too large | **Not needed** — full positional is only 102,9MB. Only necessary above a library of > ~3,5GB | Do not add complexity when the measurements show it is unnecessary |
+| 32 | `zstd-19` for the build path | **`zstd` level 3** (§3.4 L3): 6,5s vs 512s on 348,7MB, only 32% bigger than level 19 | Level 19 on Cortex-A9 costs 1,5–3 hours per build |
+| 33 | redb "2.x" | **redb 4.3.0** (API verified): `Builder::set_cache_size()`, key/value of `(&[u8], u16)`, **no native compression** | The crate has moved to 4.x; `set_cache_size` exists only on `Builder`, `len()` only on *untyped* tables, and `iter().next()` returns `Option<Result<..>>` |
+| 34 | "reading a table that was never created = an error" | **`TableDoesNotExist` = an empty table**, handled centrally in `storage::or_empty()` | A newly created DB or a user who has not enabled indexing is a normal state, not an error |
+| 35 | A single scan across every root | **Two modes: `scan_scope(dir)` and `scan_full(config)`**, `ScanMode::{Scope,Full}` (§3.1.1) | The user types a search while browsing a subdirectory → index just that directory (a few seconds), not the whole library (several minutes) |
+| 36 | Search always over the entire DB | **`ScopeFilter(dir)`** limits results by path prefix | Searching in a subdirectory must not mix in books from other directories |
+| 37 | `missing` books evaluated over the entire DB | Only evaluate books under roots **readable in this pass** | Without this guard, a full scan of one root wipes out books scope-indexed under another root |
+| 38 | Use the `mobi` crate 0.8.0 to parse MOBI | **Defer MOBI/AZW/AZW3 for now** | The `mobi` crate (the only one) has not been updated since 2022-12, depends on `encoding` 0.2 (abandoned), has 21,9% doc coverage, and `content_as_string()` returns a single String → **the byte offsets** needed by `ENTRYMAP.checkpoints` are **lost**. Only 5/614 volumes (0,8%) |
+| 39 | Sniffing reads the first 64 bytes | Read **128 bytes** | The `BOOKMOBI` magic sits at offset 60..68 — reading 64 bytes cuts the magic in half and every MOBI becomes `Unknown` |
+| 40 | Compare `<!doctype html` byte-for-byte | Compare **case-insensitively** | `<!DOCTYPE html>` is the standard, but real files contain `<!Doctype Html>`, `<!doctype html>` |
+| 41 | Parse `Event::Start` only | Parse both `Event::Start` **and** `Event::Empty` | `<item/>` and `<itemref/>` in the OPF are **self-closing** → parsing only `Start` leaves **a completely empty spine** and loses the reading order of every EPUB |
+| 42 | Extract text with the `text!("body")` handler | Use the `element!("*")` handler + `remove_and_keep_content()` | The `text!` handler also captures text **inside** `<script>` (a child of `body`) → JavaScript leaks into the index |
+| 43 | An `&` without `;` keeps at most 32 bytes | 3-state machine: `Complete` / `NotEntity` / `Truncated` | `Tom & Jerry` has `&` followed by a space → the literal must be kept immediately, otherwise a single `&` swallows 32 bytes |
+| 44 | Trust the manifest's `media-type` to know which entries are content | **Trust the file extension**: `.xhtml`, `.html`, `.htm`, `.xhtm` (§3.2) | `media-type` is often missing or misrecorded in real EPUBs; the extension in `href` is always present |
+| 45 | Compare OPF element/attribute names **case-sensitively** | `local_name()` and `attr_value()` compare with **`eq_ignore_ascii_case`** | HTML/XHTML does not require any particular case — `<Title>`, `<ItemRef>`, `<OPF:SCHEME>`, `IDREF` are all valid |
+| 46 | Look up ZIP entries **case-sensitively** | `read_entry` falls back to a case-insensitive scan | An href of `ChapterOne.XHTML` does not match the entry `chapterone.xhtml` → the section is **silently** dropped |
+| 47 | `<?xml`, `<![CDATA[` compared case-sensitively | `eq_ignore_ascii_case` | Real files contain `<?XML`, `<![cdata[` |
+| 48 | No `tokenize` module — whitespace survives in the text | A `tokenize` module with `for_each_token()` (§3.2.1) | `\r`, `\n`, `\t`, nbsp must all act as separators; previously they were still inside `Section.text` |
+| 49 | NFD + dropping combining marks only | Add manual folding of `đ`/`Đ` → `d` | `đ` (U+0111) is a letter of its own and NFD does **not** split it — without folding, typing `duoc` will not find `được` |
+| 50 | `is_alphanumeric()` keeps letters and digits in one run | Split letters from digits | `Chapter12` must yield `chapter` + `12` so that searching `3` finds `Tập 3` |
+| 51 | One-way diacritic folding → previews are lost | `for_each_token_spanned()` returns byte ranges in the **original text** (§3.2.3) | `OffsetMap` maps normalized bytes back to original bytes |
+| 52 | `src` advanced per char during NFD | Advance by the **original char**, with every byte produced by that char mapping back to the same `char_start` | A span landing mid-character → slice panic. NFD of U+1EE7 yields 3 chars, so accumulation ends at byte 57 in the middle of the letter `ủ` |
+| 53 | **Flush postings after every book** → one chunk per (term, book) | Accumulate **across books**, writing only when the pool exceeds `MAX_PENDING` (4M postings) | Real library: 743.587 chunks / 62.663 terms → 492MB output. After the fix: **71.619 chunks** — exactly enough for each term to hit `CHUNK_POSTINGS` |
+| 54 | Initially unaware that redb retains free pages | `Engine::compact()` after the session has closed its writer | Real measurement: a freshly written file is 293MB but the **raw data is only 91,5MB** → 69% is dead pages. Compaction is mandatory, not optional |
+| 55 | Read chunks in **key** order | Sort by the decoded `Chunk.first_doc` | Key `(term, chunk_idx: u16)` — redb encodes u16 **big-endian**, so a term with >256 chunks iterates out of order (chunk 256 comes before chunk 1) → positions go backwards and phrase queries **silently lose hits**. Caught by the real-library test |
+| 56 | Restart position 0 for **every section** | A single counter spanning the whole book, with `entry_idx` distinguishing sections | `pos_gap` is a delta: resetting per section makes positions **duplicate** within the same document → underflow → chunk decode corrupted. Symptom: search returns 0 hits across the board |
+| 57 | A hand-written PalmDOC parser got 3 rules wrong | `0x01..=0x08` = count N literals from the stream (does not repeat the previous character); the 14-bit item `0x80..=0xBF` = `((b&0x3F)<<8)\|next` → dist `item>>3`, len `(item&7)+3`; `0xC0..=0xFF` emits `' ' + (b^0x80)` | Caught by hexdumping a real file: `0xEF` → `" o"`, `0xC3` → `" C"`. Verified: all 5 MOBI files decode cleanly, with Vietnamese diacritics correct |
+| 58 | The indexer did not write `BOOKS` | Write `BOOKS` for every book at the same time as its metadata | `rebuild_index()` only covers books with a live `BOOKS` row → a missing row makes metadata **silently disappear** from every metadata search. Postings and metadata must be assigned the same book_id |
+| 59 | MOBI has no metadata path | `from_embedded()` reads EXTH for Mobi/Azw/Azw3 via `format::mobi` | Users require metadata to be indexed for every format; title/authors can be obtained without decompressing the text |
+| 53 | `.nfd()` applied to the whole string | NFD **per character**, and **exempting Hangul syllables** | Hangul decomposes into jamo (not combining marks) → `한국어` falls apart, and per-char NFKC cannot recompose it |
+| 54 | Intended to drop positions because "preview still has to search the EPUB again" | **Keep exact positions** (§3.4 L1.2) | Searching again is a **seek**, not a scan: 3ms (1 section) vs 18ms (the whole book). Without positions, finding "tham tu" means extracting every candidate book ≈ 9 seconds |
+| 55 | Spans could land inside a multi-byte character | Test `real_book_slices_are_always_on_char_boundaries` over 40 real books | Unit tests cannot reproduce it; it only appears on real text |
+| 56 | `remove_book` deletes only `BOOKS` + `PATHS` | Also delete the `METADATA` row, and let `rebuild_index` take only ids still in `BOOKS` | `METAIDX` is rebuilt from `METADATA` rows → a leftover row makes a deleted book **come back to life in every metadata search, permanently**. Orphan postings are filtered out on read; orphan metadata is not |
+| 57 | `MetaIndex::push` required the caller to normalize | `push` and `search` **normalize themselves** | Forgetting it once → the index silently matches nothing, with no error reported |
+| 58 | FB2 `sequence` was an `Event::Empty` | Merge `Start | Empty` (the second occurrence of the same bug) | The bug recurred a third time after OPF `itemref`/`item`: self-closing elements were dropped entirely, this time losing **every FB2 series** |
+| 59 | Trust `media-type` to know which entries are content | **Trust the file extension** (§3.2.2) | `media-type` is often missing or wrong in real EPUBs; `href` is always present |
+| 60 | OPF elements/attributes compared case-sensitively | `eq_ignore_ascii_case` | `<Title>`, `<ItemRef>`, `OPF:SCHEME`, `IDREF` are all valid → metadata and spine are both lost |
+| 61 | Preview takes the span of the last token | Remember `candidate_start` from the first token | `push()` completes the match and only receives the span of the **last** token → the preview returns `"tử"` instead of `"thám tử"` |
 
-#### 3.2.1 Bộ tokenize — những chỗ dễ làm sai
+#### 3.2.1 The tokenize module — the places that are easy to get wrong
 
-Module `tokenize` thực thi §3.2 bước 4–10. Ba quyết định không hiển nhiên:
+The `tokenize` module implements §3.2 steps 4–10. Three non-obvious decisions:
 
-**① `đ` không tách được bằng NFD — phải fold tay.** `đ` (U+0111) là chữ cái
-**riêng**: NFD cho ra chính nó, không có decomposition. Nếu chỉ dựa vào NFD thì
-người dùng gõ `duoc` trên bàn phím Mỹ **không bao giờ** tìm thấy `được`.
-`fold_letter()` map riêng `\u{0110}`/`\u{0111}` → `d`.
+**① `đ` cannot be split by NFD — it must be folded manually.** `đ` (U+0111) is a
+**letter of its own**: NFD returns the letter itself, there is no decomposition. If you rely on NFD alone, a user typing `duoc` on a US keyboard will **never** find `được`.
+`fold_letter()` maps `\u{0110}`/`\u{0111}` → `d` separately.
 
-> **`đ` và `ơ` KHÁC bản chất** — đã kiểm chứng bằng code, không phải suy đoán:
-> `NFD('ơ') = ['o', '\u{31B}']` — sừng là **combining mark có mã riêng**, nên
-> bị bỏ bởi vòng NFD thông thường. `NFD('đ') = ['đ']` — gạch ngang **không có
-> decomposition nào cả**. Cùng cơ chế với `ư` (u + U+031B), `ă` (a + U+0306),
+> **`đ` and `ơ` are fundamentally different** — verified in code, not assumed:
+> `NFD('ơ') = ['o', '\u{31B}']` — the horn is a **combining mark with its own code point**, so it
+> is removed by an ordinary NFD pass. `NFD('đ') = ['đ']` — the crossbar **has no decomposition at all**. The same mechanism
+> applies to `ư` (u + U+031B), `ă` (a + U+0306),
 > `â ê ô` (a/e/o + U+0302).
 >
-> Test `every_vietnamese_letter_collapses_to_one_ascii_letter` quét toàn bộ chữ
-> Việt (14 chữ riêng + U+1EA0..U+1EF9) và xác nhận **không** ký tự nào còn lại
-> dạng non-ASCII. Nếu bỏ `fold_letter` đi, `đ`/`Đ` sẽ hiện ngay trong danh sách đó.
+> The test `every_vietnamese_letter_collapses_to_one_ascii_letter` scans the whole Vietnamese
+> alphabet (14 dedicated letters + U+1EA0..U+1EF9) and confirms that **no** character is left in a non-ASCII form. Remove `fold_letter` and `đ`/`Đ` show up immediately in that list.
 
-**Hai hệ quả phải ghi nhận (không phải bug):**
+**Two consequences that must be recorded (these are not bugs):**
 
-- **Bỏ thanh điệu làm trùng từ.** `ta tá tà tả tã tạ` (tôi, đập, rơi, trái,
-  cả, tạ) đều gộp về `ta`. Trong tiếng Việt thanh điệu có tính phân biệt nghĩa.
-  Đây là cái giá của §0 #9 (để người không có bàn phím Việt vẫn tìm được sách).
-  Cách sửa đúng là index **cả hai dạng** (folded + nguyên bản), nhưng vậy làm gấp
-  đôi term dictionary.
-- **Ảnh hưởng cả tiếng Bắc Âu.** `å ä ö` **có** decompose (a/o + ký tự kết hợp)
-  nên cũng bị gộp: `år` (năm) và `ar` trùng nhau. Riêng `ø æ ß ł ð þ` không
-  decompose nên giữ nguyên. Vô hình trên thư viện tiếng Việt, nhưng phải biết
-  trước.
+- **Dropping tone marks makes distinct words collide.** `ta tá tà tả tã tạ` (ta "I", tá "slap", tà "fall",
+  tả "left", tã "nappy", tạ "thanks") all collapse into `ta`. In Vietnamese, tone has distinguishing meaning.
+  This is the price of §0 #9 (so that people without a Vietnamese keyboard can still find books).
+  The correct fix is to index **both forms** (folded + original), but that doubles
+  the term dictionary.
+- **Northern European languages are affected too.** `å ä ö` **do** decompose (base letter + combining mark)
+  so they are folded the same way: `år` (year) and `ar` collide. Only `ø æ ß ł ð þ` do
+  not decompose, so they stay as they are. This stays invisible on a Vietnamese library, but you must
+  know about it in advance.
 
-**② Chữ và số tách nhau (`Chapter12` → `chapter`, `12`).** `char::is_alphanumeric()`
-trả `true` cho cả hai, nên một run đơn thuần sẽ dính chúng lại. Người dùng tìm
-`3` phải ra `Tập 3` — nên run đổi lớp (chữ ↔ số) sẽ bị chặn và flush.
+**② Letters and digits split apart (`Chapter12` → `chapter`, `12`).** `char::is_alphanumeric()`
+returns `true` for both, so a single plain run would glue them together. A user searching for
+`3` must get `Tập 3` back — so a run that switches class (letters ↔ digits) is cut off and flushed.
 
-**③ Mọi ký tự không phải word-char đều là dấu tách.** Cụ thể gồm `\r`, `\n`,
+**③ Every character that is not a word-char is a separator.** Specifically `\r`, `\n`,
 `\t`, `\u{000B}`, `\u{000C}`, `\u{00A0}` (nbsp), `\u{2028}`, `—`, `_`, `-`,
-`'`, dấu câu. Không token nào có thể chứa whitespace; `term_is_clean()` kiểm tra
-điều này.
+`'`, punctuation. No token can contain whitespace; `term_is_clean()` checks
+this.
 
-Thứ tự normalize là **bắt buộc**: NFD → bỏ mark → `\u{0111}` fold → lowercase → NFKC.
-Làm NFKC trước sẽ tái hợp chuỗi và các dấu kết hợp không còn nhận ra được.
+The normalization order is **mandatory**: NFD → strip marks → `\u{0111}` fold → lowercase → NFKC.
+Run NFKC first and the string is recomposed and the combining marks can no longer be recognized.
 
-Position là bộ đếm monotone trong **toàn bộ sách**, liên tục qua các section
-(`for_each_token` trả về position cho chunk kế tiếp). CJK đếm **theo ký tự**,
-không theo byte: `中文测试` → unigram ở 0,1,2,3 và bigram ở 0,1,2.
+Position is a monotone counter over the **entire book**, continuous across sections
+(`for_each_token` returns the position for the next chunk). CJK is counted **per character**,
+not per byte: `中文测试` → unigram at 0,1,2,3 and bigram at 0,1,2.
 
-Đã kiểm chứng trên thư viện thật (`bin/tokcheck`): 25 cuốn → **3.091.495 token,
-0 token xấu**, ~123K token/cuốn, ~550K token/giây.
+Verified on a real library (`bin/tokcheck`): 25 books → **3.091.495 tokens,
+0 bad tokens**, ~123K tokens/book, ~550K tokens/second.
 
-#### 3.2.3 Phrase query — đã kiểm chứng trên thư viện thật
+#### 3.2.3 Phrase query — verified on a real library
 
-Câu hỏi then chốt: *"thám tử" có khớp được tài liệu ghi "Thám tử lừng danh"
-không?* **Có.** Test `tests/phrase_query.rs` chạy đủ pipeline (extract → tokenize
-→ positional intersect) trên 120 cuốn thật:
+The pivotal question: *does "thám tử" match a document that records "Thám tử lừng danh"
+?"* **Yes.** The test `tests/phrase_query.rs` runs the full pipeline (extract → tokenize
+→ positional intersect) on 120 real books:
 
-| Query | Sách khớp | Preview (nguyên văn) |
+| Query | Matching books | Preview (verbatim) |
 |---|---|---|
-| `thám tử` (có dấu) | 64 | `"thám tử"` |
-| `Thám tử` (hoa khác) | 64 | `"thám tử"` |
-| `THÁM TỬ` (hoa toàn bộ) | 64 | `"thám tử"` |
-| `tham tu` (**không dấu**) | 64 | `"thám tử"` |
-| `Thám-tử` (dấu tách khác) | 64 | `"thám tử"` |
-| `tử thám` (đảo thứ tự) | 29 | `"từ thâm"` |
-| `thám` (một từ) | 120 | `"thấm"` |
-| `thám tử lừng danh` (3 từ) | 8 | **`"thám tử lừng danh"`** |
+| `thám tử` (with tone marks) | 64 | `"thám tử"` |
+| `Thám tử` (different case) | 64 | `"thám tử"` |
+| `THÁM TỬ` (all caps) | 64 | `"thám tử"` |
+| `tham tu` (**no tone marks**) | 64 | `"thám tử"` |
+| `Thám-tử` (different separator) | 64 | `"thám tử"` |
+| `tử thám` (reversed order) | 29 | `"từ thâm"` |
+| `thám` (single word) | 120 | `"thấm"` |
+| `thám tử lừng danh` (3 words) | 8 | **`"thám tử lừng danh"`** |
 | `sherlock holmes` | 14 | `"Sherlock Holmes"` |
-| vô nghĩa | 0 | — |
+| nonsense | 0 | — |
 
-Bốn thuộc tính được xác nhận bằng số liệu, không phải bằng lập luận:
+Four properties confirmed by data, not by argument:
 
-1. **Bỏ dấu không đổi tập kết quả** — 64 == 64. Đây là yêu cầu chính.
-2. **Hoa/thường không ảnh hưởng** — cùng 64 cho cả 3 kiểu viết.
-3. **Dấu tách giữa các từ không ảnh hưởng** — `Thám-tử` cho cùng kết quả, vì
-   `-` chỉ là separator và position vẫn liền nhau.
-4. **Thứ tự có ý nghĩa** — `tử thám` cho 29 cuốn, ít hơn rõ rệt.
+1. **Dropping tone marks does not change the result set** — 64 == 64. This is the core requirement.
+2. **Case has no effect** — the same 64 for all 3 spellings.
+3. **Separators between words have no effect** — `Thám-tử` returns the same result, because
+   `-` is only a separator and the positions stay adjacent.
+4. **Order is meaningful** — `tử thám` returns 29 books, noticeably fewer.
 
-Hai quan sát đáng chú ý trong bảng:
-- Query `thám` match cuốn ghi **`thấm`** — đúng như hệ quả bỏ thanh điệu đã ghi
-  ở §3.2.1 (hai từ khác nhau gộp về một key). Đây là bằng chứng thực tế cho
-  cái giá đã biết đó.
-- Preview luôn là **nguyên văn của sách**, không bao giờ là key đã fold.
+Two notable observations from the table:
+- The query `thám` matches books that write **`thấm`** — exactly the tone-dropping consequence already noted
+  in §3.2.1 (two different words collapse onto one key). This is concrete evidence
+  of that known cost.
+- Preview is always the **verbatim text of the book**, never the folded key.
 
-Matching chạy streaming (O(1) bộ nhớ) chứ không giữ cả token stream: một cuốn
-~124K từ, và bản đầu của test này vật chất hóa chúng thành `String` riêng nên
-mất 5 phút; bản streaming mất **15 giây**.
+Matching runs streaming (O(1) memory) instead of holding the entire token stream: one book
+has ~124K words, and the first version of this test materialized them into separate `String`s and
+took 5 minutes; the streaming version takes **15 seconds**.
 
-#### 3.2.5 Provenance — đã kiểm chứng trên thư viện thật
+#### 3.2.5 Provenance — verified on a real library
 
-Thứ tự ưu tiên (§2.3): sidecar KOReader → metadata nhúng → tên file.
+Priority order (§2.3): KOReader sidecar → embedded metadata → file name.
 
-Kiểm chứng trên thư viện thật: **43/43** cuốn trong mẫu 150 có sidecar
-`metadata.epub.lua`, nên gần như luôn là sidecar quyết định. Điều này không phải
-chi tiết vặt: một số OPF trong thư viện ghi `<dc:language>en</dc:language>` cho
-cuốn sách tiếng Việt, trong khi sidecar ghi `text_lang = vi`. Tin OPF thì search
-sai — sidecar là thứ người dùng đang thấy nên phải thắng.
+Verified on a real library: **43/43** books in the 150-book sample have a sidecar
+`metadata.epub.lua`, so the sidecar almost always decides. This is not a
+minor detail: some OPFs in the library record `<dc:language>en</dc:language>` for
+Vietnamese-language books, while the sidecar records `text_lang = vi`. Trust the OPF and search is
+wrong — the sidecar is what the user is actually looking at, so it must win.
 
-Sidecar là Lua, nhưng ta **không** nhúng một Lua engine: chỉ đọc subset mà
-KOReader viết (`["key"] = value`, lồng 1 cấp, chuỗi có line-continuation).
-Chạy Lua tuỳ ý từ thư mục sách là rủi ro lớn hơn nhiều so với giá trị của tính năng.
+The sidecar is Lua, but we **do not** embed a Lua engine: we only read the subset that
+KOReader writes (`["key"] = value`, one level of nesting, strings with line-continuation).
+Running arbitrary Lua from the book directory is a far greater risk than the value of the feature.
 
-#### 3.2.6 Preview kết quả không bị mất
+#### 3.2.6 The result preview is not lost
 
-Lo ngại hợp lý: fold dấu + lowercase là **mất mát một chiều**, nên liệu có còn
-hiển thị được "Thám tử" khi user gõ "tham tu"?
+A legitimate concern: tone folding + lowercase is a **one-way loss**, so can we still
+display "Thám tử" when the user types "tham tu"?
 
-Phân biệt rõ:
+Keep the distinction sharp:
 
-| Thành phần | Trạng thái |
+| Component | State |
 |---|---|
-| Text gốc trong sách | **Không bao giờ bị ghi đè** — `Section.text` giữ nguyên hoa/thường và dấu |
-| Key đánh index | Đã normalize (`"Nguyễn"` → `"nguyen"`) |
-| Position của token | Có |
-| **Offset của token trong text gốc** | Có, qua `for_each_token_spanned()` |
+| Original text in the book | **Never overwritten** — `Section.text` keeps case and tone marks intact |
+| Indexing key | Normalized (`"Nguyễn"` → `"nguyen"`) |
+| Token position | Yes |
+| **Token offset in the original text** | Yes, via `for_each_token_spanned()` |
 
-`for_each_token_spanned()` trả thêm `(start, end)` — byte range trong **text gốc**,
-đó là thứ cần để cắt cửa sổ snippet. `note.md` §4.5 mô tả cách dùng:
-lấy position → tìm span → cắt ±7 token quanh đó → hiển thị nguyên văn.
+`for_each_token_spanned()` returns an extra `(start, end)` — a byte range into the **original text**,
+which is exactly what is needed to cut the snippet window. `note.md` §4.5 describes how to use it:
+take the position → find the span → cut ±7 tokens around it → display the verbatim text.
 
-Hai bug đã bắt khi làm phần này (xem §0 #52, #53):
-- `src` cộng theo **char trong lúc NFD** → span rơi vào giữa ký tự, slice panic.
-- `.nfd()` làm rách **tiếng Hàn** thành jamo và không tái hợp được.
+Two bugs caught while building this part (see §0 #52, #53):
+- `src` was advanced by **char during NFD** → the span landed in the middle of a character and the slice panicked.
+- `.nfd()` tears **Korean** apart into jamo and it cannot be recomposed.
 
-Ví dụ thật: query `"nguyen"` → key `"nguyen"` → preview
-`"Thẩm phán, công tố viên và nguyên đơn đứng ở một khoảng cách khá"` — đúng
-nguyên văn có dấu, không phải key đã fold.
+A real example: query `"nguyen"` → key `"nguyen"` → preview
+`"Thẩm phán, công tố viên và nguyên đơn đứng ở một khoảng cách khá"` — the correct
+verbatim text with tone marks, not the folded key.
 
-#### 3.2.2 Quy tắc "tin đuôi file"
+#### 3.2.2 The "trust the file extension" rule
 
-Một manifest entry được coi là **nội dung** nếu:
+A manifest entry counts as **content** if:
 
 ```
-nếu href kết thúc bằng .xhtml / .html / .htm / .xhtm  → là nội dung  (không phân biệt hoa thường)
-ngược lại nếu href KHÔNG có đuôi                    → hỏi media-type
-ngược lại                                           → không phải nội dung
+if href ends in .xhtml / .html / .htm / .xhtm   -> content           (case-insensitive)
+otherwise if href has no extension             -> consult media-type
+otherwise                                      -> not content
 ```
 
-Nhánh cuối là chặn quan trọng: không có đuôi **và** không có `media-type` hợp lệ thì ảnh,
-CSS, font không bao giờ lọt vào index. `media-type` chỉ là dự phòng, không bao giờ ghi đè
-đuôi file.
-| 35 | `config_hash` gồm `min_file_size` | Chỉ gồm setting đổi **token stream** (`index_depth`); mọi setting đổi **tập file quét** ở ngoài | `min_file_size` chỉ ảnh hưởng sách nào được quét → rescan, không phải rebuild |
+The last branch is the essential guard: with no extension **and** no valid `media-type`, images,
+CSS and fonts can never slip into the index. `media-type` is only a fallback, and must never override
+the file extension.
+| 35 | `config_hash` includes `min_file_size` | Includes only the setting that changes the **token stream** (`index_depth`); every setting that changes the **set of files scanned** stays out | `min_file_size` only affects which books get scanned → rescan, not rebuild |
+
+
 
 ---
+## 1. Goals & Constraints
 
-## 1. Mục tiêu & Ràng buộc
+### 1.1 Decision Q1: choose **option (a)** — full positional index
 
-### 1.1 Quyết định Q1: chọn **phương án (a)** — full positional index
+#### 1.1.1 Real measurements (already run — gate §7.7, no longer estimates)
 
-#### 1.1.1 Số đo thật (đã chạy — gate §7.7, không còn là ước tính)
+Measured over **all 614 EPUBs** in `~/.config/koreader/rakuyomi/downloads/calibre`,
+without extrapolating (`cargo run --release --bin measure`):
 
-Đo trên **toàn bộ 614 EPUB** trong `~/.config/koreader/rakuyomi/downloads/calibre`,
-không suy rọi (`cargo run --release --bin measure`):
-
-| Hạng mục | Giá trị đo được |
+| Item | Measured value |
 |---|---|
-| Thư mục `.epub` trên đĩa | **1,36 GB** |
-| Text sau khi trích xuất (raw UTF-8) | **348,7 MB** (25,6% của EPUB) |
-| Token = posting (gồm stopword) | **56,3 triệu** |
-| Term riêng biệt | 70.600 |
+| `.epub` folder on disk | **1,36 GB** |
+| Text after extraction (raw UTF-8) | **348,7 MB** (25,6% of EPUB) |
+| Token = posting (including stopword) | **56,3 million** |
+| Distinct terms | 70.600 |
 | Dictionary (front-coded) | **401 KB** |
-| **Index full positional** | **102,9 MB = 7,6% của EPUB** |
+| **Full positional index** | **102,9 MB = 7,6% of EPUB** |
 
-Hiệu năng build (host x86, để suy ra thứ bậc trên PW3):
-- Extract 614 cuốn: **63 s**
-- Encode index full: **5,2 s**
+Build performance (x86 host, to infer the order of magnitude on PW3):
+- Extract 614 books: **63 s**
+- Encode full index: **5,2 s**
 
-**Kết luận: phương án (a) hoàn toàn khả thi.** Với thư viện 1,36GB thì index full chỉ 102,9MB
-trên phân vùng user ~2,7GB của PW3. Điều kiện duy nhất là thư viện không vượt quá
-**~3,5GB** (102,9MB × 3,5/1,36 ≈ 265MB), vẫn nằm trong ngân sách §1.2.
+**Conclusion: option (a) is entirely feasible.** With a 1,36GB library, the full index is only 102,9MB
+on the ~2,7GB user partition of the PW3. The only condition is that the library not exceed
+**~3,5GB** (102,9MB × 3,5/1,36 ≈ 265MB), still within the §1.2 budget.
 
-Hiệu ứng của việc giữ position (`cap` = số position tối đa mỗi (term, sách)):
+Effect of keeping positions (`cap` = max number of positions per (term, book)):
 
-| cap | positions giữ lại | Index | % EPUB |
+| cap | positions kept | Index | % EPUB |
 |---|---|---|---|
 | **full** | 56,3 M (100%) | **102,9 MB** | 7,6% |
 | 32 | 18,8 M (33%) | 39,5 MB | 2,9% |
 | 8 | 8,5 M (15%) | 20,1 MB | 1,5% |
 | 2 | 3,2 M (6%) | 8,7 MB | 0,6% |
 
-**Mặc định: `cap = full`.** Kiến trúc "2 tầng + xác minh" tôi từng đề xuất **không cần thiết**
-cho thư viện này — nó chỉ trở nên đáng làm khi thư viện > 3,5GB. `cap` vẫn để user chỉnh
-được (`index_depth`) để user có thư viện lớn có thể tự hạ xuống 32 hoặc 8.
+**Default: `cap = full`.** The "2-tier + verification" architecture I once proposed is **not necessary**
+for this library — it only becomes worthwhile when the library exceeds 3,5GB. `cap` is still user-configurable
+(`index_depth`) so that users with large libraries can lower it themselves to 32 or 8.
 
-#### 1.1.2 Các con số ước tính cũ đã bị đo bác bỏ
+#### 1.1.2 Old estimate figures refuted by measurement
 
-| Giả định trong bản cũ | Đo thật | Hệ quả |
+| Assumption in the old version | Real measurement | Consequence |
 |---|---|---|
-| 2,5GB thư viện → 600M token | 1,36GB → 56,3M token (`~24 byte EPUB/token`, không phải ~4) | Phép suy rọi cũ thổi phồng kích thước gấp ~5,8 lần |
-| `pos_gap` ~5,5 bit/posting | **11,70 bit/posting** | Không coder (BIC/PFor/EF) nào qua mặt được: khoảng cách trung bình giữa hai lần xuất hiện ~3300 token |
-| `doc_gap` ~2,5 bit/posting | **0,99 bit/posting** | Rẻ hơn đoán, vì khối lượng posting tập trung ở từ tần số cao (cột doc dày đặc) |
-| `zstd-19` cho đường build | **zstd-19: 512 s / 348MB** trên host; `zstd-3`: **6,5 s** | zstd-19 trên PW3 sẽ mất vài giờ → **dùng zstd-3** (§3.4 L3) |
+| 2,5GB library → 600M tokens | 1,36GB → 56,3M tokens (`~24 byte EPUB/token`, not ~4) | The old extrapolation inflated sizes ~5,8× |
+| `pos_gap` ~5,5 bit/posting | **11,70 bit/posting** | No coder (BIC/PFor/EF) can beat it: the average distance between two occurrences is ~3300 tokens |
+| `doc_gap` ~2,5 bit/posting | **0,99 bit/posting** | Cheaper than guessed, because the posting bulk concentrates on high-frequency terms (dense doc column) |
+| `zstd-19` for the build path | **zstd-19: 512 s / 348MB** on host; `zstd-3`: **6,5 s** | zstd-19 on the PW3 would take several hours → **use zstd-3** (§3.4 L3) |
 
-**Vì sao `pos_gap` ăn 84% index:** position phải lưu tuyệt đối trong một dải dài
-(~92 nghìn token/sách), nên mỗi gap mang ~11,7 bit entropy. Đây là sàn của chính
-bài toán phrase query, không phải điểm yếu của bộ nén.
+**Why `pos_gap` accounts for 84% of the index:** position must be stored absolutely within a long span
+(~92 thousand tokens/book), so each gap carries ~11,7 bit entropy. This is a floor of the phrase
+query problem itself, not a weakness of the compressor.
 
-- Không cắt ngắn nội dung sách, không dùng block-index → **phrase query chính xác 100%**.
-- **Stopword được index** (lọc stopword thì "to be or not to be" không bao giờ khớp).
-- DB chiếm ~7,6% dung lượng thư viện đối với thư viện đo được → rất thoải mái (§1.2 vẫn giữ
-  làm vđệm phòng thư viện lớn hơn nhiều).
+- No truncating book content, no block-index → **phrase query 100% accurate**.
+- **Stopwords are indexed** (if stopwords were filtered, "to be or not to be" would never match).
+- The DB occupies ~7,6% of the library for the measured library → very comfortable (§1.2 is still kept
+  as a buffer in case of a much larger library).
 
-### 1.2 Ngân sách đĩa (bắt buộc, không tùy chọn)
+### 1.2 Disk budget (mandatory, not optional)
 
 ```
-FREE_SPACE_FLOOR = 256 MB      # KOReader cần chỗ cho cache/screenshot/temp
+FREE_SPACE_FLOOR = 256 MB      # KOReader needs room for cache/screenshot/temp
 DB_BUDGET       = min(25% × library_bytes, 700 MB)
-# thư viện đo được: 1,36GB × 25% = 340MB >> 102,9MB thực tế → chưa bao giờ chạm ngưỡng
+# measured library: 1.36 GB × 25% = 340 MB >> the actual 102.9 MB -> never comes near the ceiling
 ```
 
-- Trước mỗi sách: nếu `free_space < FREE_SPACE_FLOOR` hoặc `db_size + ước_lượng_sách_tới > DB_BUDGET` → **dừng index**, set `status = budget_exceeded`.
-- UI hiển thị: "% thư viện đã index", "DB đang chiếm X MB", nút tắt indexing.
-- Thứ tự ưu tiên khi sắp hết ngân sách: **mới thêm gần đây nhất trước** (`ORDER BY mtime DESC`).
-- Tùy chọn nữa nếu vẫn quá chặt: setting `index_depth` — `full` (mặc định) / `cap=32` / `cap=8` (§1.1.1). Đây là **công tắc chống đói dung lượng** do user chủ động bật, không phải mặc định. Với thư viện đo được thì `full` chỉ 102,9MB nên gần như không ai cần đụng tới nó.
-- Tùy chọn setting: `index_only_when_charging` (mặc định bật — tránh cạn pin).
+- Before each book: if `free_space < FREE_SPACE_FLOOR` or `db_size + est_next_book > DB_BUDGET` → **stop indexing**, set `status = budget_exceeded`.
+- UI displays: "% of library indexed", "DB currently occupies X MB", button to disable indexing.
+- Priority order when the budget is about to run out: **most recently added first** (`ORDER BY mtime DESC`).
+- Further option if it is still too tight: the `index_depth` setting — `full` (default) / `cap=32` / `cap=8` (§1.1.1). This is a **starvation safeguard** deliberately enabled by the user, not a default. For the measured library, `full` is only 102,9MB, so almost nobody needs to touch it.
+- Optional setting: `index_only_when_charging` (on by default — avoids draining the battery).
 
-### 1.3 Quy ước mã nguồn: **English only**
+### 1.3 Source code convention: **English only**
 
-**Toàn bộ code, comment, doc-comment (`///`), tên identifier, tên module, message log, message error, tên test và commit message phải viết bằng tiếng Anh.**
+**All code, comments, doc-comments (`///`), identifier names, module names, log messages, error messages, test names, and commit messages must be written in English.**
 
-**Duy nhất `note.md` và `docs/*.md` là tiếng Việt.**
+**Only `note.md` and `docs/*.md` are in Vietnamese.**
 
-Lý do:
-- Error message của ta đi thẳng vào log KOReader (người dùng paste khi báo lỗi) → phải grep/tra cứu được.
-- Output của `rustc`, `clippy`, `rustdoc`, `cargo`, mọi backtrace đều English; lẫn tiếng Việt vào log làm truy vết rối.
-- LuaJIT FFI là biên ngôn ngữ C — tên hàm và mô tả phải đọc được từ cả hai phía.
-- Nếu sau này có contributor ngoài hoặc open-source phần crate.
+Reasons:
+- Our error messages go straight into the KOReader log (users paste it when reporting bugs) → they must be greppable/lookup-able.
+- The output of `rustc`, `clippy`, `rustdoc`, `cargo`, and every backtrace is in English; mixing Vietnamese into the log makes tracing confusing.
+- LuaJIT FFI is a C language boundary — function names and descriptions must be readable from both sides.
+- If we later gain outside contributors or open-source the crates.
 
-Cách áp dụng:
-- Cấm string literal tiếng Việt trong `src/` (kiểm tra trong review).
-- `error`/`log` message viết theo mẫu: `"turbosearch: <subsystem>: <what happened>: <actionable detail>"`.
-- CI chạy `cargo clippy --all-targets -- -D warnings` và `cargo fmt --check`; review checklist có 1 dòng "no non-English strings in src/".
-- Tên biến kiểu `book_id`, `doc_gap`, `entry_idx` — dùng thuật ngữ information-retrieval tiếng Anh chuẩn, **không** dịch sang tiếng Việt rồi viết tắt.
+How it is applied:
+- Vietnamese string literals in `src/` are forbidden (checked in review).
+- `error`/`log` messages follow the pattern: `"turbosearch: <subsystem>: <what happened>: <actionable detail>"`.
+- CI runs `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`; the review checklist has one line "no non-English strings in src/".
+- Variable names like `book_id`, `doc_gap`, `entry_idx` — use standard English information-retrieval terminology, **not** translated into Vietnamese and then abbreviated.
 
 ```rust
 // Good
@@ -356,25 +355,25 @@ Cách áp dụng:
 pub struct Checkpoints { pub interval: u32, pub entries: Vec<(u32, u32)> }
 
 // Bad — never do this
-/// Bảng checkpoint: vị trí token -> offset byte trong entry thô
+/// Checkpoint table: token position -> byte offset within the raw entry
 ```
 
-### 1.4 Mục tiêu hiệu năng (đo trên máy thật, không đoán)
+### 1.4 Performance goals (measured on real hardware, not guessed)
 
-| Chỉ số | Mục tiêu |
+| Metric | Goal |
 |---|---|
-| Scan metadata 6.000 file | < 50 ms |
-| Index 1 EPUB 400KB | < 800 ms (nặng hơn v2 vì phải nén) |
-| Index toàn thư viện 2.5GB (lần đầu) | 15–40 phút, resume được |
-| Phrase query 2–3 từ | p50 < 10 ms, **p95 < 50 ms** |
-| Query có prefix expansion (§4.1.1) | p95 < 80 ms — ngân sách rộng hơn vì phải decode nhiều term hơn (cap 100K posting tổng) |
-| RAM resident lúc query | < 40 MB (dictionary ~10–15MB trong đó) |
+| Scan metadata of 6.000 files | < 50 ms |
+| Index 1 EPUB of 400KB | < 800 ms (heavier than v2 because of compression) |
+| Index the entire 2.5GB library (first time) | 15–40 minutes, resumable |
+| Phrase query of 2–3 words | p50 < 10 ms, **p95 < 50 ms** |
+| Query with prefix expansion (§4.1.1) | p95 < 80 ms — wider budget because more terms must be decoded (cap of 100K postings total) |
+| RAM resident at query time | < 40 MB (of which dictionary ~10–15MB) |
 
 ---
 
-## 2. Mô hình dữ liệu (redb 2.x)
+## 2. Data model (redb 2.x)
 
-10 bảng. Toàn bộ value là **byte packing tự viết** (không serde/bincode) để đổi schema là chủ đích.
+10 tables. All values are **hand-written byte packing** (no serde/bincode), so that changing the schema is a deliberate act.
 
 ```rust
 const META:       TableDefinition<&str,        &[u8]> = TableDefinition::new("meta");
@@ -389,397 +388,397 @@ const ENTRYMAP:  TableDefinition<(u16, u16),  &[u8]> = TableDefinition::new("ent
 const CONFIG:     TableDefinition<&str,        &[u8]> = TableDefinition::new("config");
 ```
 
-### META — 1 entry duy nhất (`key = "meta"`)
+### META — a single entry (`key = "meta"`)
 ```
 schema_version:     u32 = 3
 tokenizer_version:  u32 = 1
 normalizer_version: u32 = 1
-codec_version:      u32 = 1     # phiên bản của khối nén §3.4
-config_hash:        u32        # hash của cấu hình ảnh hưởng index
-book_id_hwm:        u16        # id kế tiếp được cấp
+codec_version:      u32 = 1     # version of the compression block §3.4
+config_hash:        u32        # hash of the config that affects the index
+book_id_hwm:        u16        # next id to be assigned
 dict_size_estimate:u32
 db_bytes_written:  u64
 status:             u8         # idle | scanning | indexing | budget_exceeded
-scan_cursor:       [u8]       # path đã xử lý gần nhất (resume)
+scan_cursor:       [u8]       # most recently processed path (resume)
 ```
-Bất kỳ version hoặc `config_hash` nào lệch với bản build hiện tại → **xóa DB và rebuild từ đầu** (an toàn hơn cố đọc format cũ).
+Any version or `config_hash` that differs from the current build → **delete the DB and rebuild from scratch** (safer than trying to read an old format).
 
 ### BOOKS — key `book_id: u16`
 ```
-scope_len: u16, scope: [u8]     # root đã phát hiện ra sách này (§3.1.1)
+scope_len: u16, scope: [u8]     # root that discovered this book (§3.1.1)
 path_len: u16, path: [u8]
-size: u64, mtime: i64, inode: u64      # inode CHỈ để debug, không dùng so khớp
+size: u64, mtime: i64, inode: u64      # inode is for debugging only, not used for matching
 format: u8                              # epub|txt|fb2|azw3
 entry_count: u16
 token_count: u32
 indexed_at: i64
-flags: u8                               # bit0 = partial (bị cap), bit1 = orphan
+flags: u8                               # bit0 = partial (capped), bit1 = orphan
 ```
 
 ### PATHS — key `path` → `book_id:u16`
-Reverse lookup O(1) cho scan.
+O(1) reverse lookup for scanning.
 
 ### METADATA — key `book_id: u16` → value
-Thông tin mô tả sách, dùng để **hiển thị** kết quả. Không dùng cho matching.
+Descriptive information about the book, used to **display** results. Not used for matching.
 
 ```
-title:        [u8]                     # như trong sách, giữ nguyên dấu/hoa
+title:        [u8]                     # as in the book, preserving diacritics and case
 subtitle:     [u8]
-authors:      [ [u8] ]                 # đã tách, dedup
+authors:      [ [u8] ]                 # already split, deduplicated
 creators:     [ [u8] ]                 # editor, translator, illustrator, narrator…
 language:     [u8]                     # BCP-47 lowercase, "vi", "en", "zh-CN"
 publisher:    [u8]
-year:         i32 (0 = không rõ)
+year:         i32 (0 = unknown)
 series:       [u8]
-series_index: u32 (×1000, 0 = không rõ)
+series_index: u32 (×1000, 0 = unknown)
 identifiers:  [ (scheme:u8, value:[u8]) ]   # isbn, doi, uuid, asin, uri, goodreads
 tags:         [ [u8] ]                 # subject/genre/keyword
-description:  [u8]                     # cap 4 KB, bit `desc_truncated` nếu cắt
+description:  [u8]                     # cap 4 KB, set the `desc_truncated` bit if truncated
 word_count:   u32
 source_format: u8                      # Format enum, §3.0.1
 provenance:   u8                       # embedded | sidecar | filename
 flags:        u8                       # bit0 = desc_truncated, bit1 = meta_only
 ```
 
-**Provenance quan trọng:** quyết định dùng metadata từ đâu, theo thứ tự ưu tiên:
-1. **Sidecar của KOReader** (`<book>.sdr/metadata.epub.lua`) nếu tồn tại → đây là thứ người dùng **đang thấy** trong thư viện KOReader, dùng lại cho nhất quán. Cần một mini parser cho *subset* Lua bảng phẳng (`key = "string"`, `key = 123`, `key = true`) — ~80 dòng, không phải Lua engine. *(Tùy chọn, phase 3 — nếu làm thì rất đáng.)*
-2. **Metadata nhúng trong file** (EPUB OPF / MOBI EXTH / FB2 `<description>`).
-3. **Tên file** (bỏ đuôi, tách `-`/`_`) — cho `.txt`/`.mobi` không có metadata.
+**Provenance matters:** it determines where metadata is taken from, in priority order:
+1. **KOReader sidecar** (`<book>.sdr/metadata.epub.lua`) if present → this is what the user **sees** in the KOReader library, so reusing it keeps things consistent. It needs a mini parser for a *subset* of flat Lua tables (`key = "string"`, `key = 123`, `key = true`) — ~80 lines, not a Lua engine. *(Optional, phase 3 — if implemented, well worth it.)*
+2. **Metadata embedded in the file** (EPUB OPF / MOBI EXTH / FB2 `<description>`).
+3. **File name** (drop the extension, split on `-`/`_`) — for `.txt`/`.mobi` with no metadata.
 
-### METAIDX — **1 KV duy nhất** (`key = "metaidx"`)
-**Đây mới là bảng phục vụ tìm kiếm metadata.** Lý do không dùng postings cho metadata: postings chỉ khớp được **cả token** (hoặc prefix), còn metadata cần khớp **chuỗi con** — người dùng gõ `nguy` phải ra `Nguyễn`, gõ `imov` phải ra `Asimov`. Khớp chuỗi con trên inverted index là không thể.
+### METAIDX — **a single KV** (`key = "metaidx"`)
+**This is the table that actually serves metadata search.** The reason postings are not used for metadata: postings can only match a **whole token** (or a prefix), while metadata needs **substring** matching — the user typing `nguy` must yield `Nguyễn`, typing `imov` must yield `Asimov`. Substring matching on an inverted index is impossible.
 
 ```
 [n_books: u32]
-với mỗi sách: [book_id: u16][blob_off: u32][blob_len: u16]     # index song song với blob
-[blob…]          # blob đã normalize (cùng normalizer §3.2), nối tiếp nhau, zstd-19 toàn khối
+for each book: [book_id: u16][blob_off: u32][blob_len: u16]     # index parallel to the blob
+[blob…]          # normalized blob (same normalizer as §3.2), concatenated, zstd-19 over the whole block
 ```
 
-Nội dung blob mỗi sách (đã normalize, phân cách bằng `\n`):
+Contents of each book's blob (already normalized, separated by `\n`):
 ```
 title\nauthor1\nauthor2\nseries\ntag1\ntag2\npublisher\nyear\nfilename_stem\ndescription
 ```
 
-**Vì sao là 1 KV duy nhất thay vì 6000 KV:** đọc 6000 blob riêng lẻ = 6000 lần `get()` = 6000 lần duyệt B-tree page. trên Kindle đó là 100–300 ms. Gộp 1 KV ~1.5–2MB nén, nạp RAM 1 lần (LRU 1) rồi quét bằng `memmem` → **< 3 ms** cho cả thư viện (6000 × ~300 byte = 1.8MB, quét tuyến tính có SIMD).
+**Why a single KV instead of 6000 KVs:** reading 6000 individual blobs = 6000 `get()` calls = 6000 B-tree page traversals. On a Kindle that is 100–300 ms. Merging into one KV of ~1.5–2MB compressed, loading it into RAM once (LRU 1), then scanning with `memmem` → **< 3 ms** for the entire library (6000 × ~300 bytes = 1.8MB, linear scan with SIMD).
 
-`METAIDX` được **rewrite toàn bộ 1 lần mỗi session index** (nén 2MB mất ~100 ms — rẻ hơn nhiều so với việc duy trì delta table).
+`METAIDX` is **rewritten in full once per indexing session** (compressing 2 MB takes ~100 ms — far cheaper than maintaining a delta table).
 
-### DICT — **1 KV duy nhất** (`key = "dict"`)
-Toàn bộ term dictionary, đã **front-coded + zstd**.
+### DICT — **a single KV** (`key = "dict"`)
+The entire term dictionary, **front-coded + zstd**.
 
 ```
 [n_terms: u32] = N
 [m_index_entries: u32]
-với mỗi block 32 term (front-coded):
-  mỗi term: [u8 prefix_len][u8 suffix_len][u16 df][u32 tf][u16 chunk_count][u8 flags][suffix bytes]
+for each block of 32 terms (front-coded):
+  each term: [u8 prefix_len][u8 suffix_len][u16 df][u32 tf][u16 chunk_count][u8 flags][suffix bytes]
 ```
-Header `m_index_entries` là sparse index cho binary search: mỗi entry trỏ tới block đầu tiên có term ≥ một ngưỡng cho trước, nằm trong vùng **đã giải nén**. Build script sinh sparse index sao cho mỗi entry cách nhau ~64 entry.
+The `m_index_entries` header is a sparse index for binary search: each entry points to the first block containing a term ≥ a given threshold, inside the **decompressed** region. The build script generates the sparse index so that entries are ~64 entries apart.
 
-Vì sao 1 KV thay vì 1M KV (§3.4 L4): redb lưu mỗi cặp KV trong leaf page 4KB. ~1M term × (key 10B + value 12B + overhead) ≈ 30–50MB chỉ cho overhead trang. Một KV ~5MB nén loại bỏ hoàn toàn phần này, và prefix search trở thành binary search trong RAM.
+Why one KV instead of 1M KVs (§3.4 L4): redb stores each KV pair in 4KB leaf pages. ~1M terms × (key 10B + value 12B + overhead) ≈ 30–50MB just for page overhead. A single ~5MB compressed KV eliminates this entirely, and prefix search becomes a binary search in RAM.
 
-### DICT_DELTA — key `term` → value nhỏ
-Chỉ chứa thay đổi của session index đang chạy: `df_delta`/`tf_delta`/`chunk_count`. Khi session đóng (hoặc compact), merge vào `DICT` và **rewrite `DICT` đúng 1 lần**, rồi xóa `DICT_DELTA`. Tránh việc rewrite cả dictionary (vài MB nén) sau mỗi sách.
+### DICT_DELTA — key `term` → small value
+Contains only the changes from the currently running indexing session: `df_delta`/`tf_delta`/`chunk_count`. When the session closes (or compacts), merge into `DICT` and **rewrite `DICT` exactly once**, then delete `DICT_DELTA`. This avoids rewriting the whole dictionary (several MB compressed) after every book.
 
-Prefix search khi đang merge: dò cả `DICT` và `DICT_DELTA` (delta nhỏ, rẻ).
+Prefix search while merging: probe both `DICT` and `DICT_DELTA` (the delta is small and cheap).
 
 ### POSTINGS — key `(term, chunk_idx: u16)` → value
 ```
-[u16 first_book_id]     # binary-search chunk mà không cần bảng index phụ
-[u32 codec_tag]         # magic + version của khối nén
+[u16 first_book_id]     # binary-search the chunk without needing an auxiliary index table
+[u32 codec_tag]         # magic + version of the compression block
 [bytes nén]             # §3.4 L1..L3
 ```
-**Chunk ~8192 posting (~7–8KB nén).** Chunk nhỏ là có chủ đích: `get()` trong redb đọc cả value → chunk nhỏ cho phép decode lazy, binary-search rẻ, và bỏ được page 4KB.
+**Chunk of ~8192 postings (~7–8KB compressed).** Small chunks are intentional: `get()` in redb reads the entire value → small chunks allow lazy decoding, cheap binary search, and eliminate the 4KB page.
 
-**Tính chất then chốt:** `book_id` tăng đơn điệu (high-water-mark). Không bao giờ tái sử dụng id → index lại sách luôn sinh id **lớn hơn** mọi id cũ → chunk mới luôn nằm sau chunk cũ theo thứ tự `(book_id, pos)`. **Append-only do đó không phá vỡ thứ tự toàn cục**, hai con trỏ intersect vẫn chạy tuyến tính. Posting mồ côi nằm lẫn trong dãy, bị bỏ qua khi intersect.
+**Key property:** `book_id` increases monotonically (high-water-mark). Ids are never reused → re-indexing a book always produces an id **greater** than every old id → the new chunk always sorts after old chunks by `(book_id, pos)`. **Append-only therefore does not break the global ordering**, and two intersecting cursors still run linearly. Orphaned postings sit inside the sequence and are skipped during intersection.
 
 ### ENTRYMAP — key `(book_id, entry_idx)` → value
-Gộp vai trò của `ANCHORS` (v2) và bảng checkpoint mới:
+Combines the role of `ANCHORS` (v2) and the new checkpoint table:
 ```
 entry_name: [u8]
 byte_len:   u32
-xpath_hint: [u8]              # id/class ổn định nếu có, để dựng Locator nhanh
-checkpoints: [u8]             # delta+PFor: mỗi 2048 token một cặp (pos, byte_off)
+xpath_hint: [u8]              # stable id/class if present, to build a Locator quickly
+checkpoints: [u8]             # delta+PFor: one (pos, byte_off) pair every 2048 tokens
 ```
 
-### CONFIG — thiết lập người dùng (§3.5)
+### CONFIG — user settings (§3.5)
 ```
-source_dirs:           [ [u8] ]    # mặc định ["/mnt/us/documents"]
+source_dirs:           [ [u8] ]    # default ["/mnt/us/documents"]
 include_extensions:    [ [u8] ]    # §3.5.1
 exclude_extensions:    [ [u8] ]    # §3.5.1
 exclude_dir_globs:     [ [u8] ]    # §3.5.2
-min_file_size:         u64         # mặc định 5120
-max_file_size:         u64         # mặc định 64 MiB
-index_fields:          u32 bitmask # field metadata nào vào METAIDX blob
-longtail_formats:      u8          # bật crate ebook-rs: RTF/ODT/DOCX/LIT/KFX
-meta_only_unparseable: u8          # PDF/DJVU vẫn index metadata (mặc định tắt)
-prefix_search_mode:    u8          # auto (mặc định) | exact | prefix  — §4.1.1
+min_file_size:         u64         # default 5120
+max_file_size:         u64         # default 64 MiB
+index_fields:          u32 bitmask # which metadata fields go into the METAIDX blob
+longtail_formats:      u8          # enable the ebook-rs crate: RTF/ODT/DOCX/LIT/KFX
+meta_only_unparseable: u8          # PDF/DJVU still index metadata (off by default)
+prefix_search_mode:    u8          # auto (default) | exact | prefix  — §4.1.1
 ```
 
-Toàn bộ đổi CONFIG đi qua Lua side → FFI `config_set()` / `config_get()`. Rust không đọc file config, không nhúng sẵn đường dẫn KOReader.
+All CONFIG changes go through the Lua side → FFI `config_set()` / `config_get()`. Rust does not read config files and does not hard-code any KOReader paths.
 
-> **§2.7 Quy tắc bảng "1 KV duy nhất"** (`META`, `DICT`, `METAIDX`): nạp RAM khi cần, LRU 1. Khác nhau ở **dữ liệu** và **nhịp độ rewrite**: `META` ghi mỗi lần scan (vài trăm byte), `DICT` merge 1 lần/session, `METAIDX` rewrite 1 lần/session. Cả 3 đều nằm ngoài đường nóng của query sau khi đã nạp.
+> **§2.7 The "single KV" table rule** (`META`, `DICT`, `METAIDX`): load into RAM on demand, LRU 1. They differ in **data** and **rewrite cadence**: `META` is written on every scan (a few hundred bytes), `DICT` merges once per session, `METAIDX` is rewritten once per session. All three are outside the query hot path once loaded.
 
 ---
 
 ## 3. Pipeline
 
-### 3.0 Nhận diện format & lọc đuôi file
+### 3.0 Format detection & file extension filtering
 
-Hai bước, có chủ đích khác nhau — **đừng lẫn**:
+Two steps, deliberately different — **do not confuse them**:
 
 ```
-bước 1  extension pre-filter  →  quyết định có ĐỌC file không (rẻ, không mở file)
-bước 2  magic sniff (64 byte) →  quyết định format THỰC (mở file, đọc 64 byte)
+step 1  extension pre-filter  ->  decides whether to READ the file at all (cheap, never opens it)
+step 2  magic sniff (64 byte) ->  decides the REAL format (opens the file, reads 64 bytes)
 ```
 
-**Extension chỉ là pre-filter tốc độ; magic byte mới là trọng tài.** Lý do: trong thư viện Kindle thật, `.azw`/`.azw3`/`.mobi`/`.kfx` đặt tên lộn xộn không đồng nhất, và file hay bị đổi tên sai đuôi. Nếu chỉ tin extension, ta sẽ bỏ sạch một nhóm sách mà không báo lỗi gì.
+**Extensions are only a speed pre-filter; magic bytes are the referee.** Reason: in a real Kindle library, `.azw`/`.azw3`/`.mobi`/`.kfx` are named inconsistently, and files are frequently renamed with the wrong extension. If we trusted extensions alone, we would silently drop an entire group of books without reporting any error.
 
 #### 3.0.1 Format enum & magic
 
-| Format | Magic / dấu hiệu | Nguồn text | Nguồn metadata | Phase |
+| Format | Magic / signature | Text source | Metadata source | Phase |
 |---|---|---|---|---|
-| **EPUB2/3, KEPUB** | `PK\x03\x04` + entry `mimetype` = `application/epub+zip` | entry `.xhtml`/`.html` theo OPF `<spine>` → `lol-html` | OPF `<metadata>` | 1 |
-| **MOBI / AZW (KF7) / AZW3 (KF8)** | `BOOKMOBI` tại offset **60..68** của PDB header | giải PalmDOC LZ77 → HTML → `lol-html` | **EXTH records** (updated title, creator, publisher, description, subject, isbn, language) | 2 |
-| **TXT / MD** | không có magic, đoán: UTF-8 hợp lệ & tỉ lệ ký tự in được cao | toàn file | tên file + header `Title:` (nếu có) | 1 |
-| **HTML / XHTML / MHTML** | bắt đầu bằng `<` (sau khi bỏ BOM/khoảng trắng) | toàn file → `lol-html` | `<title>`, `<meta name="author">` | 1 |
+| **EPUB2/3, KEPUB** | `PK\x03\x04` + entry `mimetype` = `application/epub+zip` | `.xhtml`/`.html` entries in OPF `<spine>` order → `lol-html` | OPF `<metadata>` | 1 |
+| **MOBI / AZW (KF7) / AZW3 (KF8)** | `BOOKMOBI` at offset **60..68** of the PDB header | decompress PalmDOC LZ77 → HTML → `lol-html` | **EXTH records** (updated title, creator, publisher, description, subject, isbn, language) | 2 |
+| **TXT / MD** | no magic, guessed: valid UTF-8 & high ratio of printable characters | whole file | file name + `Title:` header (if present) | 1 |
+| **HTML / XHTML / MHTML** | starts with `<` (after stripping BOM/whitespace) | whole file → `lol-html` | `<title>`, `<meta name="author">` | 1 |
 | **FB2, `.fb2.zip`** | `<?xml` + root `<FictionBook` | `<body>` | `<description>/<title-info>` (title, author, genre, annotation, date, lang) + `<publish-info>` | 2 |
 | **DOCX** | ZIP + entry `word/document.xml` | — | `docProps/core.xml` | 3 |
 | **ODT** | ZIP + `mimetype` = `application/vnd.oasis.opendocument.text` | `content.xml` | `meta.xml` | 3 |
 | **RTF** | `{\rtf` | — | `{\info …}` | 3 |
 | **LIT** | `ITOLITLS` | — | — | 3 |
 | **KFX (KF10)** | container magic `CONT` | — | — | 3 |
-| **PDF / AZW4 (Print Replica = PDF bọc)** | `%PDF` | — | — | không index content |
-| **DJVU** | `AT&TFORM` | — | — | không index content |
-| **CBZ / CBR / CB7** | ZIP toàn ảnh | — | — | không index content |
+| **PDF / AZW4 (Print Replica = wrapped PDF)** | `%PDF` | — | — | do not index content |
+| **DJVU** | `AT&TFORM` | — | — | do not index content |
+| **CBZ / CBR / CB7** | all-image ZIP | — | — | do not index content |
 
-> ⚠️ **Đính chính một niềm tin phổ biến:** MOBI/AZW/AZW3 **không giống EPUB ở tầng container**. EPUB là ZIP; MOBI/AZW3 là **PalmDB (PDB)** với `BOOKMOBI` header, body nén bằng **PalmDOC (LZ77 + Huffman)**. Cái "giống EPUB" là **payload bên trong là HTML** — nên giai đoạn `lol-html` của ta dùng lại được, còn giai đoạn đọc container phải viết riêng. PalmDOC giải nén chỉ ~150 dòng, đáng làm.
-> ⚠️ `.azw4` **không phải** sách text — nó là PDF bọc trong container Amazon. Đừng cố index.
-> ⚠️ số hiệu `.azw5/6/7/8` trong thực tế không nhất quán; **đừng phân biệt bằng số hiệu, hãy sniff `BOOKMOBI`**. File `.azw3` nào mà không có `BOOKMOBI` thì coi như không index được.
+> ⚠️ **Correcting a common belief:** MOBI/AZW/AZW3 **are not like EPUB at the container layer**. EPUB is ZIP; MOBI/AZW3 is **PalmDB (PDB)** with a `BOOKMOBI` header, body compressed with **PalmDOC (LZ77 + Huffman)**. What is "EPUB-like" is that **the payload inside is HTML** — so our `lol-html` stage can be reused, while the container-reading stage must be written separately. PalmDOC decompression is only ~150 lines, worth doing.
+> ⚠️ `.azw4` **is not** a text book — it is a PDF wrapped in an Amazon container. Do not bother indexing it.
+> ⚠️ the `.azw5/6/7/8` numbering is inconsistent in practice; **do not distinguish by number, sniff for `BOOKMOBI`**. Any `.azw3` file without `BOOKMOBI` is treated as not indexable.
 
-**Đã kiểm chứng trên thư viện thật** (`cargo run --release --bin inspect -- <file.epub>`):
-1 EPUB KonoSuba → `detected: Epub`, **25 section** theo spine, metadata đầy đủ
-(title/authors/language/series/series_index/identifiers), **405 KB text** từ file 2,2 MB.
+**Verified on a real library** (`cargo run --release --bin inspect -- <file.epub>`):
+1 EPUB KonoSuba → `detected: Epub`, **25 sections** following the spine, complete metadata
+(title/authors/language/series/series_index/identifiers), **405 KB of text** from a 2.2 MB file.
 
-#### 3.0.2 Quy tắc khi sniff xong
-- Sniff ra format trong danh sách hỗ trợ → index.
-- Sniff ra format **không** hỗ trợ (PDF/CBZ/DJVU/KFX…) → ghi `format` vào `BOOKS`, **không tạo posting**. Nếu `meta_only_unparseable = 1` thì vẫn trích metadata nếu đọc được (PDF title, tên file) để người dùng tìm thấy cuốn sách.
-- Sniff **thất bại** (không khớp magic nào, không phải UTF-8/text) → bỏ qua, log `debug` level. **Không crash.**
-- Sniff ra format **khác** với extension → **tin magic**, ghi log `warn` 1 lần/sách (giúp người dùng phát hiện thư viện lộn xộn).
+#### 3.0.2 Rules once sniffing is done
+- The sniffed format is in the supported list → index.
+- The sniffed format is **not** supported (PDF/CBZ/DJVU/KFX…) → write `format` into `BOOKS`, **do not create postings**. If `meta_only_unparseable = 1`, still extract metadata when it can be read (PDF title, file name) so the user can find the book.
+- Sniffing **fails** (no magic match, not UTF-8/text) → skip, log at `debug` level. **Do not crash.**
+- The sniffed format **differs** from the extension → **trust the magic**, log a `warn` once per book (helps the user spot a messy library).
 
-### 3.1 Scan (chỉ đọc metadata, không mở nội dung)
+### 3.1 Scan (metadata only, does not open content)
 
 ```
-1. duyệt source_dirs, bỏ qua theo §3.5.2 (thư mục loại trừ)
-2. với mỗi entry:
-     ├── là thư mục tên *.sdr / nằm trong exclude_dir_globs  → bỏ qua cả thư mục
-     ├── file ẩn (bắt đầu bằng '.')                          → bỏ qua
-     ├── extension ∈ exclude_extensions                      → bỏ qua (IBM AppleDouble, thumbnail…)
-     ├── extension ∉ include_extensions                      → bỏ qua
-     └── size ngoài [min_file_size, max_file_size]           → bỏ qua
-3. sort theo mtime DESC (ưu tiên sách mới — §1.2)
-4. với mỗi file còn lại:
-     tra PATHS[path]
-     ├── không có                                → NEW   : cấp id = hwm++, ghi PATHS
-     ├── có, và (size, mtime) trùng BOOKS[path]  → SKIP  : không mở file (0 I/O)
-     └── có, nhưng (size, mtime) khác            → UPDATE: cấp id mới, id cũ thành orphan
-5. id còn trong BOOKS mà không thấy trên đĩa     → ORPHAN: xóa BOOKS + PATHS + METADATA, posting tự hủy
-6. ghi scan_cursor sau mỗi ~200 file
+1. walk source_dirs, skipping per §3.5.2 (excluded directories)
+2. for each entry:
+     ├── a directory named *.sdr or matched by exclude_dir_globs → skip the whole directory
+     ├── a hidden file (starts with '.')                          → skip
+     ├── extension in exclude_extensions                          → skip (IBM AppleDouble, thumbnails...)
+     ├── extension not in include_extensions                      → skip
+     └── size outside [min_file_size, max_file_size]              → skip
+3. sort by mtime DESC (newest books first — §1.2)
+4. for each remaining file:
+     look up PATHS[path]
+     ├── absent                                    → NEW   : assign id = hwm++, write PATHS
+     ├── present, and (size, mtime) matches BOOKS   → SKIP  : do not open the file (0 I/O)
+     └── present, but (size, mtime) differs         → UPDATE: assign a new id, the old one is orphaned
+5. an id still in BOOKS but no longer on disk       → ORPHAN: delete BOOKS + PATHS + METADATA, postings expire on their own
+6. write scan_cursor after every ~200 files
 ```
 
-**Bước 2 không mở file** — chỉ `read_dir` + `stat`. Đó là toàn bộ lý do tồn tại của `include_extensions`: nếu không có nó, ta phải mở 64 byte của **mọi** file trong `/documents` (kể cả ảnh, `.lua`, `.log`) mới biết cái nào index được.
+**Step 2 does not open files** — only `read_dir` + `stat`. That is the entire reason `include_extensions` exists: without it, we would have to open 64 bytes of **every** file under `/documents` (including images, `.lua`, `.log`) just to know which ones are indexable.
 
-Ghi `scan_cursor` và mỗi sách **1 transaction riêng** → mất điện tối đa mất 1 sách.
+Write `scan_cursor`, and put each book in **its own separate transaction** → a power failure loses at most one book.
 
-> **Không** dùng mtime của thư mục để bỏ qua scan. Trên vfat, bản copy qua USB có thể giữ nguyên mtime+size; chỉ `read_dir` (rẻ) mới phát hiện được set file thay đổi.
+> **Do not** use directory mtime to skip a scan. On vfat, a copy made over USB may preserve mtime+size; only `read_dir` (cheap) can detect that a set of files has changed.
 
-#### 3.1.1 Hai chế độ quét: `scope` và `full`
+#### 3.1.1 Two scan modes: `scope` and `full`
 
-`config_hash` gọi `source_dirs` (nhiều thư mục) chỉ dùng cho **full scan**. Nhưng user hiếm khi
-chờ index xong mới search — họ mở thư mục đang xem rồi gõ ngay. Hai chế độ:
+`config_hash` calls `source_dirs` (multiple directories) used only for the **full scan**. But users rarely
+wait for indexing to finish before searching — they open the folder they are browsing and start typing right away. Two modes:
 
 | | `scan_scope(dir)` | `scan_full(config)` |
 |---|---|---|
-| Roots | **một** thư mục user đang mở | mọi `source_dirs` |
-| Khi nào | user gõ search lần đầu | user bấm "index toàn bộ", hoặc lịch định kỳ |
-| Thời gian | **vài giây** (chục cuốn) | **vài phút** (cả thư viện) |
+| Roots | **one** folder the user currently has open | every `source_dirs` |
+| When | the user types a search for the first time | the user presses "index everything", or a periodic schedule |
+| Duration | **a few seconds** (a few dozen books) | **a few minutes** (the whole library) |
 | `ScanMode` | `Scope` | `Full` |
 
-Hàm Rust: `scan_scope(engine, filter, dir)` và `scan_full(engine, config)`, cả hai đi qua
+Rust functions: `scan_scope(engine, filter, dir)` and `scan_full(engine, config)`, both going through
 `scan_with_mode(engine, filter, roots, mode)`.
 
-**Search cũng phải scope.** Cùng lý do: user đang ở một thư mục con mà tự nhiên query chạy trên
-toàn bộ DB thì (a) kết quả lẫn sách họ không quan tâm, (b) lần đầu tiên DB rỗng nên chẳng có gì
-để tìm. Query nhận thêm `ScopeFilter::new(dir)`; kết quả chỉ giữ sách có path nằm dưới `dir`.
+**Search must be scoped as well.** Same reason: the user is in a subfolder and suddenly the query runs over
+the entire DB, so (a) results are mixed with books they do not care about, and (b) the first time the DB is empty anyway so there is
+nothing to find. The query takes an additional `ScopeFilter::new(dir)`; results keep only books whose path lies under `dir`.
 
-**Bất biến quan trọng — scope không được xóa sách của scope khác.** Mỗi sách lưu thêm
-`scope` = root đã phát hiện ra nó. Trong `scan_with_mode`, sách chỉ bị báo `missing` nếu
-nằm dưới một root **thực sự đọc được trong lượt này** (`covered_prefixes`). Nếu không có
-guard này thì kịch bản sau sẽ mất sách:
+**Important invariant — a scope must not delete books belonging to another scope.** Each book additionally
+stores `scope` = the root that discovered it. In `scan_with_mode`, a book is only reported `missing` if
+it lies under a root **actually read during this run** (`covered_prefixes`). Without
+this guard, the following scenario loses books:
 
-1. User scope-index `/documents/Books/A` (không nằm trong `source_dirs`) → 2 cuốn vào DB.
-2. User chạy full scan với `source_dirs = [/documents/Books/B]`.
-3. Không có guard → 2 cuốn trong A bị coi là "mất trên đĩa" → **xóa sạch**.
+1. The user scope-indexes `/documents/Books/A` (not part of `source_dirs`) → 2 books enter the DB.
+2. The user runs a full scan with `source_dirs = [/documents/Books/B]`.
+3. Without the guard → the 2 books in A are considered "missing from disk" → **all deleted**.
 
-Cùng cơ chế cũng bảo vệ trường hợp rút thẻ SD: root không đọc được ⇒ không kết luận được gì ⇒
-không có sách nào bị orphan.
+The same mechanism also protects the case of pulling the SD card: a root that cannot be read ⇒ nothing can be concluded ⇒
+no book becomes an orphan.
 
-> So sánh dùng `path == scope || path.starts_with(scope + "/")`, không bao giờ so sánh byte
-> thuần, để `/docs` không khớp nhầm `/documents-extra`.
+> Compare using `path == scope || path.starts_with(scope + "/")`, never comparing raw
+> bytes, so that `/docs` does not accidentally match `/documents-extra`.
 
-> `scanned_roots` trong `ScanPlan` ghi lại mọi root đã đi qua (đọc được hay không) để UI hiển
-> thị "đã index những thư mục nào" và để tính `Coverage` (`Empty`/`Partial`/`Full`).
+> `scanned_roots` in `ScanPlan` records every root that was traversed (readable or not) so the UI can
+> display "which folders have been indexed" and to compute `Coverage` (`Empty`/`Partial`/`Full`).
 
-### 3.2 Trích xuất, Metadata & Tokenize
+### 3.2 Extraction, Metadata & Tokenize
 
-Thứ tự bắt buộc: **decode format → trích metadata → tokenize nội dung**. Metadata trích một lần, ghi `METADATA`, rồi đưa vào blob `METAIDX`.
+Mandatory order: **decode format → extract metadata → tokenize content**. Metadata is extracted once, written to `METADATA`, then fed into the `METAIDX` blob.
 
-1. **Decode container** theo format đã sniff (§3.0.1) → danh sách "section" có thứ tự đọc xác định:
-   - EPUB: entry theo OPF `<spine>` (parse `META-INF/container.xml` → OPF → `<spine>`/`<manifest>`). Fallback nếu parse lỗi: sort theo tên entry — và đánh dấu `flags.partial`.
-   - MOBI/AZW3: giải nén toàn bộ text records thành **một** section duy nhất, cắt theo dấu hiệu chương nếu có.
-   - TXT/MD: **một** section = toàn file (decode encoding bằng `encoding_rs`, ưu tiên BOM → heuristic).
-   - HTML/XHTML: một section.
-   - FB2: `<body>` → mỗi `<section>` là một section.
-2. **Trích metadata** bằng parser riêng cho từng format (OPF XML / PDB EXTH / FB2 XML / `<title>` / tên file). Ghi `METADATA[book_id]`. Nếu không trích được gì → `provenance = filename`, dùng tên file làm `title`.
-3. **Tạo `METAIDX` blob** cho sách này: normalize (cùng normalizer §3.2 bước 4) rồi nối các field được bật trong `index_fields`, phân cách bằng `\n`. Blob này sẽ được ghi lại vào `METAIDX` khi session đóng.
-4. Entry là `.xhtml`/`.html` → `lol-html` rewriter, **chỉ ghi text trong `<body>`**, ignore `<head>/<style>/<script>/<meta>/<!-- -->`.
-5. **Làm sạch biên chunk:** buffer `pending` mang token dở qua giữa các chunk. Mọi ranh giới thẻ **flush** `pending` (tránh `foo<em>bar</em>` dính thành `foobar`).
-6. **Normalize (thứ tự bắt buộc):**
+1. **Decode the container** according to the sniffed format (§3.0.1) → an ordered list of "sections" with a well-defined reading order:
+   - EPUB: entries in OPF `<spine>` order (parse `META-INF/container.xml` → OPF → `<spine>`/`<manifest>`). Fallback if parsing fails: sort by entry name — and set `flags.partial`.
+   - MOBI/AZW3: decompress all text records into **a single** section, split by chapter markers if present.
+   - TXT/MD: **one** section = the whole file (decode the encoding with `encoding_rs`, preferring BOM → heuristic).
+   - HTML/XHTML: one section.
+   - FB2: `<body>` → each `<section>` is one section.
+2. **Extract metadata** with a dedicated parser for each format (OPF XML / PDB EXTH / FB2 XML / `<title>` / file name). Write `METADATA[book_id]`. If nothing can be extracted → `provenance = filename`, use the file name as `title`.
+3. **Build the `METAIDX` blob** for this book: normalize (the same normalizer as §3.2 step 4) then concatenate the fields enabled in `index_fields`, separated by `\n`. This blob will be written back into `METAIDX` when the session closes.
+4. The entry is `.xhtml`/`.html` → `lol-html` rewriter, **only record text inside `<body>`**, ignore `<head>/<style>/<script>/<meta>/<!-- -->`.
+5. **Clean up chunk boundaries:** the `pending` buffer carries half-finished tokens across chunks. Every tag boundary **flushes** `pending` (prevents `foo<em>bar</em>` from sticking together into `foobar`).
+6. **Normalize (mandatory order):**
    ```
-   bytes → utf8 (BOM/entity đã do lol-html xử lý) → NFD → bỏ combining mark (U+0300..=U+036F)
-        → lowercase → NFKC nhẹ (½, ², dấu câu kép)
+   bytes -> utf8 (BOM/entities already handled by lol-html) -> NFD -> strip combining marks (U+0300..=U+036F)
+        -> lowercase -> light NFKC (½, ², double punctuation)
    ```
-   → `"Thám"` và `"tham"` cùng một key.
-7. **CJK:** không có space → mỗi ký tự CJK là 1 token (unigram) và **thêm bigram** cho cặp ký tự liền nhau, cả hai mang position của ký tự đầu. "中文测试" → `中文@p, 文测@p+1, 测试@p+2` và `中@p, 文@p+1, 试@p+2, 测@p+3`. Cùng một bộ đếm position với từ Latin.
-8. **Position** = bộ đếm tăng dần trong toàn bộ sách (liên tục qua các section theo thứ tự đọc), bắt đầu 0. **Metadata KHÔNG nằm trong không gian position** — nó nằm ở `METAIDX` (§2.3), nên position 0 luôn là token đầu tiên của nội dung. Điều này giữ cho logic checkpoint/snippet sạch và không phải xử lý trường hợp đặc biệt.
-9. **Checkpoint:** mỗi `CHECKPOINT_INTERVAL = 2048` token, ghi lại cặp `(pos, byte_off_hiện_tại)` → `ENTRYMAP.checkpoints`. Đây là **thay thế** cho việc lưu `byte_off` ở từng posting.
-10. **Cap mềm:** tối đa 100.000 pos cho mỗi (sách, term); vượt thì set `flags.partial` + `flags.truncated` trong `DICT`.
-11. **Cap an toàn** (mỗi format): section ≤ 32MB giải nén, ≤ 2000 section, tổng ≤ 512MB.
+   → `"Thám"` and `"tham"` share the same key.
+7. **CJK:** there are no spaces → each CJK character is 1 token (unigram) and **add bigrams** for adjacent character pairs, both carrying the position of the first character. "中文测试" → `中文@p, 文测@p+1, 测试@p+2` and `中@p, 文@p+1, 试@p+2, 测@p+3`. The same position counter set as for Latin words.
+8. **Position** = an increasing counter across the whole book (continuous across sections in reading order), starting at 0. **Metadata is NOT in the position space** — it lives in `METAIDX` (§2.3), so position 0 is always the first token of content. This keeps checkpoint/snippet logic clean and free of special cases.
+9. **Checkpoint:** every `CHECKPOINT_INTERVAL = 2048` tokens, record the pair `(pos, current byte_off)` → `ENTRYMAP.checkpoints`. This is a **replacement** for storing `byte_off` in each posting.
+10. **Soft cap:** at most 100,000 positions for each (book, term); if exceeded, set `flags.partial` + `flags.truncated` in `DICT`.
+11. **Safety cap** (per format): section ≤ 32MB decompressed, ≤ 2000 sections, total ≤ 512MB.
 
-### 3.3 Nén & ghi
+### 3.3 Compression & writing
 
-- Sort term theo thứ tự byte trước khi ghi → insert tuyến tính vào B-tree của redb (nhanh hơn nhiều so với ngẫu nhiên).
-- Posting chỉ còn 3 field: `doc_gap`, `pos_gap`, `entry_idx`.
-- Append chunk mới với `chunk_idx = chunk_count`; cập nhật `DICT_DELTA` (df, tf, chunk_count).
-- Merge `DICT_DELTA` → `DICT` khi session đóng.
+- Sort terms in byte order before writing → linear insertion into redb's B-tree (much faster than random).
+- Postings now have only 3 fields: `doc_gap`, `pos_gap`, `entry_idx`.
+- Append a new chunk with `chunk_idx = chunk_count`; update `DICT_DELTA` (df, tf, chunk_count).
+- Merge `DICT_DELTA` → `DICT` when the session closes.
 
-### 3.4 Chiến lược nén tối đa (max compression)
+### 3.4 Max compression strategy
 
-Nén theo 6 lớp, xếp theo mức độ **tiết kiệm được bao nhiêu**, không phải theo mức độ hay ho:
+Compression in 6 layers, ranked by **how much is actually saved**, not by how fancy they are:
 
-#### L1 — Bỏ field tốn kém nhất: `byte_off` *(tiết kiệm ~15–20%)*
-`byte_off` là giá trị tuyệt đối gần phân bố đều trong `[0, entry_len]` → entropy cao nhất trong posting. V3 **bỏ hẳn** khỏi posting, chỉ giữ `entry_idx` + `pos`. Snippet sau này dò checkpoint gần nhất, seek tới `byte_off` của checkpoint, rồi tokenize tiếp tối đa 2048 token (~10–20KB) để tìm vị trí chính xác. Chi phí snippet tăng vài ms — chỉ xảy ra cho ≤3 snippet/sách.
+#### L1 — Drop the most expensive field: `byte_off` *(saves ~15–20%)*
+`byte_off` is an absolute value that is nearly uniformly distributed within `[0, entry_len]` → the highest entropy of anything in a posting. V3 **drops it entirely** from postings, keeping only `entry_idx` + `pos`. Snippet extraction later scans for the nearest checkpoint, seeks to that checkpoint's `byte_off`, then re-tokenizes at most 2048 tokens (~10–20KB) to find the exact position. The snippet cost rises by a few ms — and that only happens for ≤3 snippets per book.
 
-#### L1.1 DB không nhân bản text — chỉ giữ một dạng dẫn xuất
+#### L1.1 The DB does not duplicate text — it stores a single derived form
 
-Câu hỏi thường gặp: *"DB lưu 2 bản, một real một bỏ dấu à?"* **Không.**
+A common question: *"does the DB store two copies, one real and one with diacritics stripped?"* **No.**
 
-| | Lưu trong DB? | Ghi chú |
+| | Stored in the DB? | Note |
 |---|---|---|
-| Text thật của sách | **Không** | Nằm trong `.epub` trên đĩa, đó vẫn là nguồn duy nhất. Toàn thư viện đo được 348,7 MB — không nhân bản vào DB |
-| Term đã fold + position + doc_id | **Có** (`POSTINGS`) | Đây **không phải** "bản text bỏ dấu" mà là cấu trúc khác: túm term riêng biệt kèm vị trí. Toàn thư viện đo được 102,9 MB |
-| Metadata hiển thị (title, author…) | **Có** (`METADATA`) | Vài trăm byte/cuốn |
+| The book's actual text | **No** | It lives in the `.epub` on disk, which remains the single source. The whole library measures 348,7 MB — it is not duplicated into the DB |
+| Folded term + position + doc_id | **Yes** (`POSTINGS`) | This is **not** a "diacritics-stripped copy of the text" but a different structure: isolated terms with their positions. The whole library measures 102,9 MB |
+| Display metadata (title, author…) | **Yes** (`METADATA`) | A few hundred bytes per book |
 
-Tức DB chỉ chiếm ~103 MB cho cả chỉ mục, không phải ~452 MB.
+So the DB takes only ~103 MB for the entire index, not ~452 MB.
 
-#### L1.2 Position chính xác có vẻ thừa, nhưng đo được thì ngược lại
+#### L1.2 Exact positions look redundant, but the measurements say otherwise
 
-Câu hỏi hợp lý: *"nếu preview vẫn phải lục lại `.epub`, thì lưu position chi tiết
-làm gì?"* — vì việc lục lại **không phải quét, nó là seek tới chỗ đã biết**.
+A fair question: *"if previews still have to dig back through the `.epub`, what is the point of storing detailed
+positions?"* — because digging back through it **is not a scan, it is a seek to an address we already know**.
 
-Đo trên 120 cuốn thật (12,7M posting), `bin/postest`:
+Measured on 120 real books (12,7M postings), `bin/postest`:
 
-| Cách lưu | Kích thước | Cả thư viện | Phrase query "tham tu" |
+| Storage scheme | Size | Whole library | Phrase query "tham tu" |
 |---|---|---|---|
-| Chỉ doc_id + freq | 2,0 MB | ~10 MB | phải extract mọi sách ứng viên ≈ **9 giây** |
-| Position làm nhám 1024 token | 6,1 MB | ~31 MB | quá nhiều báo giả |
-| Position làm nhám 256 token | 8,4 MB | ~43 MB | quá nhiều báo giả |
-| Position làm nhám 64 token | 11,3 MB | ~58 MB | 5903 ứng viên phải xác minh (**5,6 giả / 1 đúng**) |
-| **Position chính xác** | 20,7 MB | **102,9 MB** | **896 đúng, 0 báo giả**, ~5ms |
+| doc_id + freq only | 2,0 MB | ~10 MB | every candidate book must be extracted ≈ **9 seconds** |
+| Positions blurred to 1024 tokens | 6,1 MB | ~31 MB | too many false positives |
+| Positions blurred to 256 tokens | 8,4 MB | ~43 MB | too many false positives |
+| Positions blurred to 64 tokens | 11,3 MB | ~58 MB | 5903 candidates must be verified (**5,6 false / 1 correct**) |
+| **Exact positions** | 20,7 MB | **102,9 MB** | **896 correct, 0 false positives**, ~5ms |
 
-Hàng "làm nhám 64 token" nhìn có vẻ hời (−45% dung lượng) nhưng sinh 6,6× số ứng
-viên phải xác minh, mỗi cái ~10ms extract → query chậm thêm ~6 giây. Nó **tự phá**
-ngân sách p95 < 50ms đã chọn ở §1.4. Đổi 45MB lấy 5ms là cái giá đáng.
+The "blur to 64 tokens" row looks like a bargain (−45% footprint) but produces 6,6× as many candidates
+to verify, each ~10ms of extraction → queries get ~6 seconds slower. It **self-destructs** against
+the p95 < 50ms budget chosen in §1.4. Trading 45MB for 5ms is a price well worth paying.
 
-> **Position và checkpoint không trùng nhau.** Position trả lời "token thứ mấy
-> trong sách"; checkpoint trả lời "token thứ mấy nằm ở byte nào trong file". Cả hai
-> đều cần: không có position thì phải quét cả cuốn, không có checkpoint thì position
-> không dùng translation sang được vị trí đọc.
+> **Positions and checkpoints are not the same thing.** A position answers "which token is it
+> in the book"; a checkpoint answers "which token sits at which byte in the file". Both are
+> needed: without positions you must scan the whole book, and without a checkpoint a position
+> cannot be translated into a place to read.
 
-**`byte_off` trong checkpoint phải trỏ vào byte THÔ của entry trong ZIP, không phải vào text đã decode.**
+**`byte_off` in a checkpoint must point at the RAW byte of the entry in the ZIP, not into the decoded text.**
 
-Lý do: byte thô của `.epub` không bao giờ đổi; nếu file đổi thì `size`/`mtime` đổi nên ta index lại. Ngược lại, nếu tôi sửa một dòng config `lol-html`, bộ decode entity, hay thêm một bộ lọc — mọi offset kiểu "vào text đã decode" sẽ trỏ sai chỗ **mà không có lỗi nào**, chỉ là snippet hiện sai. Đó là lỗi khó debug nhất loại có thể có.
+Why: the raw bytes of an `.epub` never change; if the file changes, `size`/`mtime` change and we re-index. Conversely, if I change one line of `lol-html` config, the entity decoder, or add a filter — every offset of the "into the decoded text" kind will point at the wrong place **with no error at all**, the snippet simply displays wrong content. That is the hardest class of bug there is to debug.
 
-#### L2 — Chọn coder theo **tính đơn điệu** của từng cột *(tiết kiệm ~10–20% so với PForDelta)*
-Đây là điểm mấu chốt: mỗi cột có hình dạng khác nhau, dùng một coder cho cả 4 cột là lãng phí.
+#### L2 — Choose the coder by the **monotonicity** of each column *(saves ~10–20% versus PForDelta)*
+This is the crux of the matter: each column has a different shape, and using one coder for all 4 columns is a waste.
 
-| Cột | Hình dạng | Coder | Vì sao |
+| Column | Shape | Coder | Why |
 |---|---|---|---|
-| `doc_gap` | đơn điệu, gap nhỏ | **Elias-Fano** | gần tối ưu cho dãy đơn điệu, overhead chỉ ~2 bit/phần tử, decode vét cạn |
-| `pos_gap` | đơn điệu trong cùng doc, biên độ phụ thuộc doc | **Binary Interpolative Coding (BIC)** | tối ưu khi biết biên trên; thắng PForDelta rõ ở gap lớn và biến thiên (đúng với tail của phân bố Zipf) |
-| `entry_idx` | gần như hằng số trong suốt một doc | **RLE** | chuyển thành run `(value, run_len)` → ~0.1 bit/posting |
-| ~~`byte_off`~~ | — | **đã bỏ** (L1) | — |
+| `doc_gap` | monotone, small gaps | **Elias-Fano** | near-optimal for monotone sequences, overhead only ~2 bit/element, decode drains the stream |
+| `pos_gap` | monotone within a doc, amplitude depends on the doc | **Binary Interpolative Coding (BIC)** | optimal when the upper bound is known; clearly beats PForDelta on large and varying gaps (matching the tail of the Zipf distribution) |
+| `entry_idx` | nearly constant throughout a doc | **RLE** | becomes runs `(value, run_len)` → ~0.1 bit/posting |
+| ~~`byte_off`~~ | — | **dropped** (L1) | — |
 
-Block = 128 posting. Mỗi block chọn coder theo `frac_bits` thực tế của dải; nếu một giá trị vượt thì đẩy vào danh sách exception. Nếu decode BIC phức tạp quá cho deadline, chốt phương án dự phòng **OptPFD** (tự chọn giữa PForDelta và VByte cho từng block) — ít nén hơn BIC vài % nhưng đơn giản hơn nhiều.
+Block = 128 postings. Each block picks its coder based on the actual `frac_bits` of its range; if a value overflows it goes into the exception list. If BIC decode turns out too complex for the deadline, the fallback is **OptPFD** (choosing between PForDelta and VByte per block) — a few percent worse than BIC at compression, but far simpler.
 
-#### L3 — Lớp entropy trên đầu *(tiết kiệm ~10–15%)*
-Sau L2, áp `zstd` lên toàn bộ block đã mã hóa. Dữ liệu đã entropy-coded vẫn nén thêm được vì PForDelta/Elias-Fano để lại nhiều bit dư. Dùng **trained dictionary** (train từ ~500 chunk mẫu) — chunk của ta nhỏ và đồng dạng hình dạng nên dictionary trained thường ăn thêm 5–10% so với zstd không train.
+#### L3 — An entropy layer on top *(saves ~10–15%)*
+After L2, apply `zstd` over the whole encoded block. Already entropy-coded data still compresses further because PForDelta/Elias-Fano leave a lot of redundant bits. Use a **trained dictionary** (trained on ~500 sample chunks) — our chunks are small and uniform in shape, so a trained dictionary typically gains another 5–10% over untrained zstd.
 
-**Level: `zstd` level 3 — KHÔNG dùng level 19.** Đo trên 348,7MB text thật:
+**Level: `zstd` level 3 — do NOT use level 19.** Measured on 348,7MB of real text:
 
-| level | kích thước | thời gian (host x86) |
+| level | size | time (x86 host) |
 |---|---|---|
-| 3 | 100,9 MB (28,9% text) | 6,5 s |
-| 19 | 68,4 MB (19,6% text) | **512 s** |
+| 3 | 100,9 MB (28,9% of text) | 6,5 s |
+| 19 | 68,4 MB (19,6% of text) | **512 s** |
 
-Level 19 chỉ nhỏ hơn level 3 đúng **32%** nhưng chậm gấp **~79×**. Trên Cortex-A9 (chậm hơn host ~10–20×) thì level 19 mất **1,5–3 giờ** cho một lần build toàn thư viện, trong khi level 3 chỉ **~2 phút**. Level 19 chỉ dùng được khi build offline trên host rồi copy sang Kindle — khai báo đường đó là tuỳ chọn, **không phải mặc định**.
+Level 19 is only **32%** smaller than level 3 but **~79×** slower. On a Cortex-A9 (roughly 10–20× slower than the host) level 19 takes **1,5–3 hours** for one full-library build, while level 3 takes only **~2 minutes**. Level 19 is only usable when building offline on the host and then copying to the Kindle — declare that path as an option, **not the default**.
 
-Decompress nhanh ở mọi level (~1GB/s) và ta chỉ decode ~10KB mỗi chunk query, nên chọn level chỉ ảnh hưởng đường *ghi*, không ảnh hưởng ngân sách p95 < 50ms.
+Decompression is fast at every level (~1GB/s) and we only decode ~10KB per queried chunk, so the level choice only affects the *write* path, not the p95 < 50ms budget.
 
-#### L4 — Dictionary gói gọn *(tiết kiệm ~30–50MB + nhanh hơn)*
-Front coding trên dictionary đã sort: lưu `[prefix_len][suffix]` thay vì cả term → giảm ~50–60% kích thước term text. Gộp theo block 32 term để vẫn binary-search được. Sau đó zstd. Và đặt vào **một KV duy nhất** (`DICT`) — xem §2 để biết vì sao 1M KV sẽ mất 30–50MB chỉ cho overhead trang của redb. Kèm theo đó, prefix search từ "vài page-read" thành "binary search trong RAM".
+#### L4 — A compact dictionary *(saves ~30–50MB + faster)*
+Front coding on the sorted dictionary: store `[prefix_len][suffix]` instead of the whole term → cuts term text size by ~50–60%. Group into blocks of 32 terms so binary search still works. Then zstd. And put it in **a single KV** (`DICT`) — see §2 for why 1M KVs would cost 30–50MB in redb page overhead alone. As a bonus, prefix search goes from "a few page reads" to "a binary search in RAM".
 
-#### L5 — Sự thật về redb (đã kiểm tra tài liệu, đừng đoán)
-**redb 2.x không có nén native.** `Database::builder()` chỉ cung cấp `set_cache_size()`, `set_page_size()`, `set_repair_callback()`, `set_region_size()`. Value vào redb là byte thô, không qua bất kỳ lớp nén nào.
+#### L5 — The truth about redb (docs checked, don't guess)
+**redb 2.x has no native compression.** `Database::builder()` only provides `set_cache_size()`, `set_page_size()`, `set_repair_callback()`, `set_region_size()`. A value going into redb is raw bytes, passing through no compression layer whatsoever.
 
-→ Hệ quả: **mọi lớp L1–L4 phải do ta làm trước khi ghi**, và nếu ai đó bỏ lớp nào thì index sẽ to gấp 2–5 lần mà không có warning nào từ redb. Đây cũng là lý do schema ta lưu `codec_version` trong `META`.
+→ Consequence: **every layer from L1 to L4 must be implemented by us before writing**, and if someone drops a layer the index will be 2–5 times larger with no warning at all from redb. This is also why our schema stores `codec_version` in `META`.
 
-#### L6 — Thu hồi chỗ (reclaim)
-- Posting mồ côi (sách đã xóa/đổi) nằm lại trong DB. Compact/rebuild toàn bộ khi mồ côi > 25% DB.
-- redb dùng copy-on-write: rewrite cả chunk (chứ không sửa tại chỗ) → `fragmented_bytes` sẽ lớn dần. `compact()` định kỳ.
+#### L6 — Space reclamation
+- Orphaned postings (books deleted or changed) remain in the DB. Compact/rebuild everything once orphans exceed 25% of the DB.
+- redb is copy-on-write: it rewrites the whole chunk (rather than patching in place) → `fragmented_bytes` will grow over time. Call `compact()` periodically.
 
-#### Tóm tắt ngân sách
+#### Budget summary
 
-| Thành phần | Kỹ thuật | ~bit/posting | 600M posting |
+| Component | Technique | ~bit/posting | 600M postings |
 |---|---|---|---|
 | `doc_gap` | Elias-Fano | 2.5 | ~190 MB |
 | `pos_gap` | BIC | 5.5 | ~415 MB |
 | `entry_idx` | RLE | 0.3 | ~23 MB |
-| `byte_off` | **bỏ** → `ENTRYMAP` | 0 | ~5 MB |
+| `byte_off` | **dropped** → `ENTRYMAP` | 0 | ~5 MB |
 | block header + exceptions | | 1.0 | ~75 MB |
 | zstd-19 + trained dict | −15% | | −105 MB |
 | **Postings** | | **~8.6** | **~600 MB** |
 | Dictionary | front coding + zstd, 1 KV | | ~5 MB |
 | `BOOKS`/`PATHS`/`ENTRYMAP`/`DICT` | | | ~20 MB |
-| `METADATA` + `METAIDX` (6.000 cuốn) | blob metadata ~2MB nén | | ~15 MB |
-| **TỔNG (điểm ước tính)** | | | **~640 MB** |
+| `METADATA` + `METAIDX` (6.000 books) | compressed metadata blob ~2MB | | ~15 MB |
+| **TOTAL (planning estimate)** | | | **~640 MB** |
 
-> ⚠️ Con số trong bảng là **ước tính** để chọn coder, không phải cam kết. Sai số có thể ±50% (corpus ít từ lặp sẽ tốt hơn, corpus nhiều tên riêng/code sẽ xấu hơn), nên §1.1 ghi **khoảng 500–700MB** thay vì một con số. Điểm cần định đoạt là §7.7 — đo thật trên 300 cuốn rồi hiệu chỉnh. Nếu đo ra xấu hơn nhiều, khâu nên tinh chỉ đầu tiên là `pos_gap` (chiếm 2/3 budget), kế đến là bật `index_depth = balanced`.
+> ⚠️ The numbers in the table are **estimates** for choosing coders, not commitments. The error can be ±50% (a corpus with few repeated words will do better, a corpus heavy in proper names/code will do worse), which is why §1.1 records **roughly 500–700MB** instead of a single figure. The point that must be decided is §7.7 — measure for real on 300 books and then tune. If the measurement comes out much worse, the first thing to tune is `pos_gap` (which accounts for 2/3 of the budget), followed by enabling `index_depth = balanced`.
 
 ---
 
-### 3.5 Cấu hình đuôi file & thư mục
+### 3.5 File extension and directory configuration
 
-Người dùng chỉnh từ UI KOReader → FFI `config_set()` → bảng `CONFIG`. Không có file cấu hình riêng, không hardcode đường dẫn trong Rust.
+The user configures this from the KOReader UI → FFI `config_set()` → the `CONFIG` table. There is no separate configuration file, and no paths are hardcoded in Rust.
 
-#### 3.5.1 Danh sách đuôi file mặc định
+#### 3.5.1 Default file extension list
 
-**Mặc định ĐƯỢC index** (có chữ để đọc):
+**Indexed by default** (they contain text to read):
 ```
 epub  kepub  mobi  azw  azw3  txt  text  md  markdown
 fb2  fb2.zip  html  htm  xhtml  xht  htm  shtml
 ```
 
-**Mặc định BỊ LOẠI TRỪ** (rác, không phải sách):
+**Excluded by default** (junk, not books):
 ```
 lua  log  json  xml  opf  ncx  css  js  mjs  py  rs  sh  bash  toml  yaml  yml
 ini  cfg  conf  bak  tmp  temp  part  partial  swp  old  orig  db  db3  sqlite3
@@ -788,151 +787,152 @@ zip  gz  tgz  bz2  xz  7z  rar  tar  zst
 pdf  djvu  djv  cbz  cbr  cb7  cbt  azw4  azw6  azw8  kfx  tpz
 sdr  opf  toc  ncx  calibre  cover
 ```
-> Ghi chú: `pdf/djvu/cbz` nằm trong danh sách loại trừ **về mặt content search** (§3.0.2), nhưng vẫn bị loại ở bước pre-filter. Nếu bật `meta_only_unparseable = 1` thì chúng được **đưa vào** `include_extensions` để vẫn index metadata.
+> Note: `pdf/djvu/cbz` are in the exclusion list **as far as content search** is concerned (§3.0.2), but they are still excluded at the pre-filter step. If `meta_only_unparseable = 1` is enabled, they are **added to** `include_extensions` so their metadata is still indexed.
 
-**Quy tắc giải quyết xung đột:** `exclude_extensions` **thắng** `include_extensions`. Người dùng thêm `.azw3` vào include mà `.azw4` nằm trong exclude thì `.azw4` vẫn bị loại.
+**Conflict resolution rule:** `exclude_extensions` **wins over** `include_extensions`. If the user adds `.azw3` to include while `.azw4` is in exclude, `.azw4` is still dropped.
 
-**Người dùng muốn thêm đuôi mới:** thêm vào `include_extensions` (vd `.azw4`, `.dat`, `.prc`). Nếu file thực chất là MOBI/EPUB/TXT thì magic sniff (§3.0) vẫn nhận ra đúng. Đây là điểm mạnh của việc tách pre-filter và sniff.
+**If the user wants to add a new extension:** add it to `include_extensions` (e.g. `.azw4`, `.dat`, `.prc`). If the file is in fact MOBI/EPUB/TXT, magic sniffing (§3.0) still recognizes it correctly. This is the strength of keeping pre-filter and sniff separate.
 
-#### 3.5.2 Loại trừ thư mục
+#### 3.5.2 Directory exclusion
 
 ```
-exclude_dir_globs (mặc định): *.sdr, .calibre*, .thumbnails, @eaDir, __MACOSX,
+exclude_dir_globs (default): *.sdr, .calibre*, .thumbnails, @eaDir, __MACOSX,
                               koreader, system, extensions, .Trash*, lost+found
 ```
-Thư mục khớp glob → **bỏ qua cả cây con** (không đệ quy vào). Đây là tối ưu quan trọng: `<book>.sdr/` của KOReader chứa `metadata.epub.lua`, `custom.css`, `cover.jpg` — đều là rác so với ta.
+A directory matching the glob → **skip the entire subtree** (do not recurse into it). This is an important optimization: KOReader's `<book>.sdr/` contains `metadata.epub.lua`, `custom.css`, `cover.jpg` — all junk as far as we are concerned.
 
-Thêm nữa, bỏ qua mọi entry bắt đầu bằng `.` (trừ khi người dùng thêm glob `.*` vào include).
+Additionally, ignore every entry starting with `.` (unless the user adds the glob `.*` to include).
 
-Nguồn quét mặc định: `/mnt/us/documents`. Người dùng có thể thêm `/mnt/us/books` hoặc một thư mục bất kỳ.
+Default scan source: `/mnt/us/documents`. The user can add `/mnt/us/books` or any other directory.
 
-#### 3.5.3 Option nào phải rebuild index, option nào chỉ cần rescan
+#### 3.5.3 Which options require an index rebuild, and which only need a rescan
 
-Đây là chỗ dễ gây lỗi âm thầm nhất — **đổi option nhạy cảm mà không rebuild = index sai, không ai biết.**
+This is the easiest place to cause a silent bug — **changing a sensitive option without rebuilding = a wrong index, and nobody knows.**
 
-| Option | Ảnh hưởng | Hành động khi đổi |
+| Option | Impact | Action when changed |
 |---|---|---|
-| `fold_diacritics` | đổi token stream | **rebuild toàn bộ** (bump `config_hash`) |
-| `cjk_bigrams` | đổi token stream | **rebuild** |
-| `index_fields` | đổi nội dung blob metadata | **rebuild `METAIDX`** |
-| `include_description` | đổi nội dung blob metadata | **rebuild `METAIDX`** |
-| `index_depth` (§1.2) | đổi position | **rebuild** |
-| `checkpoint_interval` | không đổi token, chỉ mật độ checkpoint | ghi lại ENTRYMAP ở lần index kế tiếp |
-| `include_extensions` | đổi tập file quét | **rescan** (không rebuild) |
-| `exclude_extensions` | đổi tập file quét | **rescan**; file bị bỏ → orphan tự hủy |
-| `exclude_dir_globs` | đổi tập file quét | **rescan** |
-| `source_dirs` | đổi tập file quét | **rescan** |
-| `min/max_file_size` | đổi tập file quét | **rescan** |
-| `meta_only_unparseable` | đổi tập file quét | **rescan** |
-| `prefix_search_mode` | chỉ đổi cách query mở rộng term, không đổi token stream | **không cần rescan, không cần rebuild** — chỉ cần reload engine |
+| `fold_diacritics` | changes the token stream | **full rebuild** (bump `config_hash`) |
+| `cjk_bigrams` | changes the token stream | **rebuild** |
+| `index_fields` | changes the metadata blob contents | **rebuild `METAIDX`** |
+| `include_description` | changes the metadata blob contents | **rebuild `METAIDX`** |
+| `index_depth` (§1.2) | changes positions | **rebuild** |
+| `checkpoint_interval` | does not change tokens, only checkpoint density | rewrite ENTRYMAP at the next index pass |
+| `include_extensions` | changes the set of files scanned | **rescan** (no rebuild) |
+| `exclude_extensions` | changes the set of files scanned | **rescan**; dropped files become self-cleaning orphans |
+| `exclude_dir_globs` | changes the set of files scanned | **rescan** |
+| `source_dirs` | changes the set of files scanned | **rescan** |
+| `min/max_file_size` | changes the set of files scanned | **rescan** |
+| `meta_only_unparseable` | changes the set of files scanned | **rescan** |
+| `prefix_search_mode` | only changes how a query expands terms, does not change the token stream | **no rescan, no rebuild** needed — just reload the engine |
 
-Nhóm trên chỉ cần rescan vì posting của sách cũ **không hề thay đổi** — đó là hệ quả trực tiếp của thiết kế "index lại = cấp `book_id` mới" (§0 #5).
+The group above only needs a rescan because the postings of old books **do not change at all** — that is a direct consequence of the "re-index = issue a new `book_id`" design (§0 #5).
 
-#### 3.5.4 Cách tốt nhất để tránh rebuild oan
-`config_hash` trong `META` chỉ được tính từ **nhóm rebuild** ở bảng trên. Nhóm rescan đổi thoải mái. Nếu ai đó lỡ thêm một option nhạy cảm mà quên đưa vào hash → đoạn này là nơi phải cập nhật, và §7 có test chống hồi quy cho việc này.
-
----
-
-## 4. Truy vấn
-
-### 4.1 Phrase query (nội dung sách)
-1. Tokenize query bằng **đúng** normalizer ở §3.2 (đảm bảo tiền định) → nếu có CJK, sinh thêm bigram.
-2. Dò `DICT` (+ `DICT_DELTA` nếu đang có) → `df` mỗi term. **Xếp theo df tăng dần** (hiếm nhất trước).
-3. Với term hiếm nhất: duyệt lần lượt chunk; trong mỗi chunk decode từng block (chỉ ~64KB RAM/decode), thực hiện **positional intersect** với ràng buộc `pos[i+1] - pos[i] = gap_i` (`gap = 1` cho liền nhau — đúng vì stopword vẫn được index).
-4. Binary-search chunk cho term còn lại bằng `first_book_id` ở đầu value, thay vì decode toàn bộ.
-5. Posting trỏ tới `book_id` không còn trong `BOOKS` (mồ côi) → bỏ qua.
-
-#### 4.1.1 Fallback prefix expansion — **bắt buộc, không phải tùy chọn**
-
-**Vấn đề:** query `cha` chỉ khớp từ `cha`. Trong thư viện thật, người dùng gõ "cha", "sher", "nguy" với ý định là "chai", "sherlock", "nguyễn". Trên bàn phím PW3 (d-pad, gõ chậm, dễ mỏi) thì **gõ một phần của từ là hành vi chủ đạo**, không phải edge case. Chế độ exact-only sẽ làm search thất bại thường xuyên.
-
-**Giải pháp — quy tắc "không có trong dict thì mở rộng thành prefix":**
-
-```
-với mỗi term t của query:
-    nếu t ∈ DICT                    → term_set(t) = { t }              # từ đầy đủ, KHÔNG mở rộng
-    nếu t ∉ DICT                    → term_set(t) = prefix_scan(t)     # mở rộng
-```
-
-Vì sao chỉ mở rộng khi `t` **không** có trong dict: nếu `t` là từ tồn tại thật (vd `cha`, `the`, `nó`) thì người dùng có ý định gõ đúng từ đó — mở rộng sẽ làm kết quả bắt ngẫu nhiên. Nếu `t` không phải từ nào trong cả thư viện (`sher`, `nguy`) thì gần như chắc chắn là từ chưa gõ xong. Quy tắc này cho độ chính xác cao với chi phí gần bằng không.
-
-**Chi tiết thuật toán:**
-1. `prefix_scan(t)` = range scan `DICT` trong `[t, successor(t))`, lấy theo `df` giảm dần, chặn bởi cả hai mức: **≤ 64 term** và **tổng `df` ≤ 100.000**. Vượt cả hai → trả về rỗng, set `status = too_broad` (báo UI "quá nhiều kết quả, gõ thêm ký tự").
-2. Với mỗi term t, **gộp postings của cả `term_set(t)` thành một stream duy nhất** (`union_postings`). Stream vẫn giữ thứ tự `(book_id, pos)` — xem lưu ý bên dưới.
-3. Positional intersect giữ nguyên: `pos[i+1] - pos[i] = gap_i`. Vậy query `cha chai` với `cha` → `{chai, chan}` sẽ khớp đúng cả "chai chai" lẫn "chan chai". **Không phải làm cặp từng term (không phải |T1|×|T2|).
-4. Nếu `term_set(t)` có > 1 term → đánh dấu match là `fuzzy`. **Phải hiển thị cho người dùng biết** (vd gạch chân từ đã mở rộng trong ô tìm kiếm), nếu không họ sẽ không hiểu tại sao gõ `cha` lại ra sách không có chữ "cha".
-5. Ranking: match trên term được mở rộng bị giảm hệ số `0.7` so với exact.
-
-**Setting người dùng:** `prefix_search_mode` = `auto` (mặc định, quy tắc trên) | `exact` (chỉ khớp term đầy đủ) | `prefix` (luôn mở rộng mọi term, kể cả từ đã có trong dict — cho người dùng muốn recall tối đa).
-
-**Vì sao `union_postings` vẫn đúng thứ tự:** trong `DICT` các term đã sort theo byte, nên các term bắt đầu bằng cùng prefix **liền nhau trong B-tree của redb**. `union_postings` merge các chunk theo thứ tự `(term, chunk_idx)` → trong phạm vi một term thì vẫn sort đúng theo `(book_id, pos)`. Intersect hai pointer vẫn chạy tuyến tính.
-
-### 4.2 Tìm theo metadata (title / author / series / tag)
-Chạy **song song và độc lập** với §4.1, không dùng postings:
-
-1. Nạp `METAIDX` (2–3MB nén → ~5MB RAM, LRU 1, chỉ nạp 1 lần mỗi đợt query).
-2. Chuẩn hóa query bằng đúng normalizer §3.2 → `q`.
-3. Với **mỗi** blob sách (6000 blob × ~300 byte = 1.8MB): `memmem(blob, q)`. SIMD memchr quét 1.8MB ≈ < 3 ms trên Cortex-A9.
-4. Nếu `q` không khớp blob nào nhưng khớp ở dạng token → cũng thử khớp theo từng token của `q` (để "nguyễn nhật ánh" tìm được "Nguyễn Nhật Ánh" khi blob chứa đúng chuỗi đó).
-5. Trả về `(book_id, field_mask)` cho biết khớp ở field nào (`title`, `authors`, `series`, `tags`…).
-
-**Vì sao không dùng inverted index cho metadata:** postings chỉ khớp được **cả token** hoặc prefix, còn người dùng gõ `nguy` chắc chắn muốn ra `Nguyễn`, gõ `imov` muốn ra `Asimov`. Khớp chuỗi con trên 1.8MB vừa nhanh vừa đủ — không cần index.
-
-### 4.3 Prefix / gợi ý (autocomplete)
-- Với **từ trong nội dung**: binary search trong `DICT` (đã nạp RAM, §3.4 L4) từ prefix đến successor (vd `"sher"` → `"shes"`). Giới hạn 200 term đầu, gộp posting.
-- Với **metadata**: quét 6000 blob trong `METAIDX` bằng prefix của từng field. Cùng chi phí ~3 ms.
-- Gộp cả hai nguồn gợi ý, ưu tiên metadata hit (tên sách/tác giả) lên trước.
-- **Dùng lại đúng hàm `prefix_scan()` của §4.1.1** — không viết hai lần. Gợi ý là preview của việc user sẽ bấm Search, nên hai bước phải cho kết quả nhất quán.
-
-### 4.4 Ranking (gộp 2 nguồn)
-```
-score(book) = w_meta × meta_hits × idf_meta     # match title/author — tín hiệu mạnh nhất
-            + Σ_term  tf_term_in_book × idf_term  # match nội dung
-```
-`w_meta` mặc định cao (~3×) vì người dùng gõ tên sách/tác giả thì ý định gần như chắc chắn là muốn cuốn đó, dù nội dung có thể cũng chứa cụm đó. Giảm dần, group theo sách, mỗi sách giữ tối đa 3 kết quả.
-
-### 4.5 Snippet & mở sách
-1. **Match nội dung:** `ENTRYMAP[(book_id, entry_idx)]` → `entry_name` + `checkpoints`.
-   - Tìm checkpoint gần nhất **≤** `pos` (binary search trong mảng đã decode).
-   - Mở file, seek `byte_off` của checkpoint, decode tiếp bằng `lol-html`, đếm token tới `pos` (≤ 2048 token), lấy ~700 byte quanh match → highlight.
-   - LRU cache 2 file gần nhất (tránh mở lại cùng một sách khi user lướt kết quả).
-2. **Match metadata:** không có snippet text — trả **thẻ metadata** (title, authors, series, publisher, năm, tags) từ bảng `METADATA`. Đây là điều người dùng mong đợi khi tìm theo tên sách.
-3. **Lazy** khi user *chạm* kết quả: đếm element đến offset đó → dựng `Locator` (xpointer) cho KOReader nhảy đúng trang. Vài ms, 1 lần/kết quả được chọn.
+#### 3.5.4 The best way to avoid unnecessary rebuilds
+The `config_hash` in `META` is computed from the **rebuild group** in the table above only. The rescan group can change freely. If someone happens to add a sensitive option and forget to include it in the hash → this section is the place that must be updated, and §7 has a regression test for exactly this.
 
 ---
 
-## 5. Tích hợp KOReader
+## 4. Query
 
-| Hạng mục | Quyết định |
+### 4.1 Phrase query (book content)
+1. Tokenize the query using the **exact same** normalizer as in §3.2 (ensuring the prefix property) → if CJK is present, additionally generate bigrams.
+2. Look up `DICT` (+ `DICT_DELTA` if present) → `df` for each term. **Sort by ascending `df`** (rarest first).
+3. For the rarest term: iterate chunks in order; within each chunk decode each block (only ~64KB RAM/decode), perform a **positional intersect** with the constraint `pos[i+1] - pos[i] = gap_i` (`gap = 1` for adjacency — correct because stopwords are still indexed).
+4. Binary-search the chunks for the remaining terms using `first_book_id` at the start of the value, instead of decoding everything.
+5. A posting pointing to a `book_id` that is no longer in `BOOKS` (orphan) → skip it.
+
+#### 4.1.1 Fallback prefix expansion — **mandatory, not optional**
+
+**Problem:** the query `cha` only matches the word `cha`. In a real library, users type "cha", "sher", "nguy" intending "chai", "sherlock", "nguyễn". On the PW3 keyboard (d-pad, slow typing, easily tiring) **typing a fragment of a word is the dominant behavior**, not an edge case. An exact-only mode would make search fail frequently.
+
+**Solution — the rule "if it is not in the dict, expand it into a prefix":**
+
+```
+for each query term t:
+    if t ∈ DICT                     → term_set(t) = { t }              # a complete word, do NOT expand
+    if t ∉ DICT                     → term_set(t) = prefix_scan(t)     # expand
+```
+
+Why expand only when t is **not** in the dict: if `t` is a word that really exists (e.g. `cha`, `the`, `nó`) then the user intends to type that exact word — expanding would make results match at random. If `t` is not any word in the entire library (`sher`, `nguy`) then it is almost certainly a word that has not been finished being typed. This rule delivers high accuracy at nearly zero cost.
+
+**Algorithm details:**
+1. `prefix_scan(t)` = range scan of `DICT` over `[t, successor(t))`, fetched in descending `df`, capped by both limits: **≤ 64 terms** and **total `df` ≤ 100,000**. Exceeding either → return empty, set `status = too_broad` (tell the UI "too many results, type more characters").
+2. For each term t, **merge the postings of the entire `term_set(t)` into a single stream** (`union_postings`). The stream still preserves `(book_id, pos)` order — see the note below.
+3. The positional intersect stays the same: `pos[i+1] - pos[i] = gap_i`. So the query `cha chai` with `cha` → `{chai, chan}` will correctly match both "chai chai" and "chan chai". **There is no need to pair terms one by one (it is not |T1|×|T2|).
+4. If `term_set(t)` has > 1 term → mark the match as `fuzzy`. **This must be shown to the user** (e.g. underline the expanded term in the search box), otherwise they will not understand why typing `cha` returns books that do not contain the text "cha".
+5. Ranking: a match on an expanded term is downweighted by a factor of `0.7` compared to exact.
+
+**User setting:** `prefix_search_mode` = `auto` (default, the rule above) | `exact` (match full terms only) | `prefix` (always expand every term, including words already in the dict — for users who want maximum recall).
+
+**Why `union_postings` is still ordered:** in `DICT` the terms are already sorted by byte, so terms that begin with the same prefix are **adjacent in redb's B-tree**. `union_postings` merges the chunks in `(term, chunk_idx)` order → within the scope of a single term the sort is still correct by `(book_id, pos)`. The two-pointer intersect still runs linearly.
+
+### 4.2 Metadata search (title / author / series / tag)
+Runs **in parallel and independently** of §4.1, without using postings:
+
+1. Load `METAIDX` (2–3MB compressed → ~5MB RAM, LRU 1, loaded only once per query batch).
+2. Normalize the query using the exact normalizer from §3.2 → `q`.
+3. For **every** book blob (6000 blobs × ~300 bytes = 1.8MB): `memmem(blob, q)`. SIMD memchr scans 1.8MB ≈ < 3 ms on Cortex-A9.
+4. If `q` matches no blob but matches in token form → also try matching each token of `q` (so that "nguyễn nhật ánh" finds "Nguyễn Nhật Ánh" when the blob contains that exact string).
+5. Return `(book_id, field_mask)` indicating which field matched (`title`, `authors`, `series`, `tags`…).
+
+**Why an inverted index is not used for metadata:** postings can only match a **whole token** or a prefix, whereas a user typing `nguy` certainly wants `Nguyễn`, and typing `imov` wants `Asimov`. Substring matching over 1.8MB is both fast enough and sufficient — no index needed.
+
+### 4.3 Prefix / suggestions (autocomplete)
+- For **words in content**: binary search in `DICT` (already loaded in RAM, §3.4 L4) from the prefix up to its successor (e.g. `"sher"` → `"shes"`). Limit to the first 200 terms, merge postings.
+- For **metadata**: scan the 6000 blobs in `METAIDX` with the prefix of each field. Same cost, ~3 ms.
+- Merge both suggestion sources, prioritizing metadata hits (book title/author) first.
+- **Reuse the exact `prefix_scan()` function from §4.1.1** — do not write it twice. Suggestions are a preview of the user pressing Search, so the two steps must produce consistent results.
+
+### 4.4 Ranking (merging 2 sources)
+```
+score(book) = w_meta × meta_hits × idf_meta     # title/author match — the strongest signal
+            + Σ_term  tf_term_in_book × idf_term  # content match
+```
+`w_meta` defaults to high (~3×) because when the user types a book title or author name the intent is almost certainly to find that specific book, even if the content may also contain that phrase. Sort descending, group by book, each book keeps at most 3 results.
+
+### 4.5 Snippet & opening a book
+1. **Content match:** `ENTRYMAP[(book_id, entry_idx)]` → `entry_name` + `checkpoints`.
+   - Find the nearest checkpoint **≤** `pos` (binary search in the decoded array).
+   - Open the file, seek to the checkpoint's `byte_off`, continue decoding with `lol-html`, count tokens up to `pos` (≤ 2048 tokens), take ~700 bytes around the match → highlight.
+   - LRU cache of the 2 most recent files (to avoid reopening the same book as the user scrolls through results).
+2. **Metadata match:** there is no text snippet — return a **metadata card** (title, authors, series, publisher, year, tags) from the `METADATA` table. This is what the user expects when searching by book title.
+3. **Lazy** when the user *taps* a result: count elements up to that offset → build a `Locator` (xpointer) so KOReader jumps to the right page. A few ms, once per selected result.
+
+---
+
+## 5. KOReader integration
+
+| Item | Decision |
 |---|---|
-| Artifact | `crate-type = ["cdylib"]` → `libturbosearch.so`, chỉ export hàm `extern "C"` + opaque handle (`Box::into_raw`) |
-| Cross-compile | target `armv7-unknown-linux-gnueabihf`, **cùng toolchain/glibc với koreader-base** (hard-float, NEON). Không hard-code `-C target-cpu=cortex-a9` để còn chạy máy khác |
+| Artifact | `crate-type = ["cdylib"]` → `libturbosearch.so`, exporting only `extern "C"` functions + an opaque handle (`Box::into_raw`) |
+| Cross-compile | target `armv7-unknown-linux-gnueabihf`, **same toolchain/glibc as koreader-base** (hard-float, NEON). Do not hard-code `-C target-cpu=cortex-a9` so it can still run on other devices |
 | Lua side | `ffi.cdef` + `ffi.load("/mnt/us/koreader/search/libturbosearch.so")` |
-| Threading | Index chạy trong background task của KOReader; FFI expose `progress()`. **Không bao giờ block UI thread** |
-| Vị trí DB | `/mnt/us/koreader/search/turbosearch.redb` |
-| Crash safety | redb có WAL/ACID → mất điện không hỏng DB, chỉ mất tối đa 1 sách (§3.1) |
-| ABI check | `so` kiểm tra `schema_version` lúc load; lệch → trả lỗi "rebuild needed", không crash |
+| Threading | Indexing runs in KOReader's background task; the FFI exposes `progress()`. **Never block the UI thread** |
+| DB location | `/mnt/us/koreader/search/turbosearch.redb` |
+| Crash safety | redb has WAL/ACID → a power loss will not corrupt the DB, losing at most 1 book (§3.1) |
+| ABI check | the `so` checks `schema_version` at load; mismatch → return a "rebuild needed" error, no crash |
 
-Crate:
+Crates:
 ```
-redb 2.x · zip 2.x · flate2 (miniz_oxide — thuần Rust, không cần zlib C)
+redb 2.x · zip 2.x · flate2 (miniz_oxide — pure Rust, no C zlib needed)
 lol-html 1.x · unicode-normalization · rustix (statvfs) · libc
 
-Đa định dạng & metadata:
-  quick-xml         — parse OPF (EPUB), FB2 <description>, META-INF/container.xml. Nhẹ, thuần Rust.
-  encoding_rs       — TXT/MD/HTML: BOM sniff + heuristic cho UTF-8/UTF-16/cp1252/Shift-JIS/GBK.
-  memchr            — memmem cho METAIDX (§4.2), và nhanh hơn naive scan nội bộ indexer.
-  (tùy chọn) ebook-rs 0.16.x — only for long-tail formats, feature-gated `--features longtail`.
-       LD flags: PDF (pdf_oxide), DOCX, RTF, ODT, LIT, KFX.
-       Pure Rust, magic-byte detection, có metadata() + sections(). Nhưng chỉ mới 0.16,
-       phụ thuộc nặng (zlib-rs, regex, whatlang, simdutf8, serde_json…) và 45% doc coverage.
-       → KHÔNG dùng cho EPUB/TXT/MOBI/FB2 (4 format chiếm >95% thư viện Kindle, tự làm được).
-       Chỉ bật khi user thực sự có file đuôi lạ và tự chọn longtail_formats = 1.
+Multi-format & metadata:
+  quick-xml         — parse OPF (EPUB), FB2 <description>, META-INF/container.xml. Light, pure Rust.
+  encoding_rs       — TXT/MD/HTML: BOM sniff + heuristics for UTF-8/UTF-16/cp1252/Shift-JIS/GBK.
+  memchr            — memmem for METAIDX (§4.2), and faster than a naive scan inside the indexer.
+  (optional) ebook-rs 0.16.x — only for long-tail formats, feature-gated `--features longtail`.
+       Leading options: PDF (pdf_oxide), DOCX, RTF, ODT, LIT, KFX.
+       Pure Rust, magic-byte detection, exposes metadata() + sections(). But still at 0.16,
+       with heavy dependencies (zlib-rs, regex, whatlang, simdutf8, serde_json...) and 45% doc coverage.
+       → do NOT use it for EPUB/TXT/MOBI/FB2 (4 formats covering >95% of a Kindle library, all
+       implementable here).
+       Only enable it when the user genuinely has unusual extensions and sets longtail_formats = 1.
 ```
 
-PalmDOC giải nén (~150 dòng, tự viết): xem §3.0.2. Không có crate ổn định, và đây là phần lõi của MOBI/AZW3 nên phải tự chắc tay.
+PalmDOC decompression (~150 lines, hand-written): see §3.0.2. There is no stable crate, and this is the core of MOBI/AZW3, so it must be written by hand.
 
-Tự viết in-repo (không có crate đủ tốt): Elias-Fano, BIC, RLE, front coding, PForDelta dự phòng. Tổng ~600 dòng + property test.
+Written in-repo (no existing crate is good enough): Elias-Fano, BIC, RLE, front coding, PForDelta as a fallback. About ~600 lines total + property test.
 
 `Cargo.toml` profile:
 ```toml
@@ -945,140 +945,140 @@ strip = true
 
 [features]
 default = []
-longtail = ["ebook-rs"]     # tắt mặc định: nhị phân nhỏ, ít phụ thuộc hơn
+longtail = ["ebook-rs"]     # off by default: smaller binary, fewer dependencies
 ```
 
 ---
 
-## 6. RAM / I/O trên PW3
+## 6. RAM / I/O on PW3
 
-- **`METAIDX` nạp RAM khi có query metadata**: ~2–3MB nén → ~5–6MB giải nén. LRU 1, giải phóng được khi idle.
-- `DICT` nạp RAM ~10–15MB resident (LRU 1). Khoản RAM lớn nhất.
-- **Cả hai nên dùng chung một budget** `query_arena` ~24MB; nếu query không cần metadata thì không nạp `METAIDX`.
-- Accumulator mỗi sách (hashmap term → Vec<posting>) ~5–15MB cho sách thường; sách outlier > 200MB text → **flush theo chunk thay vì giữ hết**.
-- redb `set_cache_size(8..=16 MB)` — **mặc định của redb là 1GiB**, trên máy 512MB RAM thì đây là lỗi nghiêm trọng nếu quên.
-- I/O: phase scan chỉ `stat` → rẻ. I/O nặng ở lần index đầu và snippet (cold read 1 entry ZIP).
-- Buffer zstd giữ cố định ~64KB, không cấp phát lại mỗi chunk.
-- **`METAIDX` rewrite 1 lần/session** = nén ~5MB → ~1ms CPU, không đáng lo. Nhưng **đừng** rewrite nó sau mỗi sách.
-
----
-
-## 7. Kiểm thử
-
-1. **Property test** mỗi coder: random `Vec<u32>` → encode → decode → bằng nhau. Elias-Fano, BIC, RLE, PForDelta, front coding, mỗi cái 1 triệu case trên host.
-2. **Compression benchmark** trên host: đo bit/posting thực tế cho từng coder với dữ liệu Zipf nhân tạo + một corpus tiếng Anh/Việt/Trung thật → chọn coder bằng số đo, không bằng cảm tính.
-3. **Golden test** tokenizer: 20 file HTML/EPUB mẫu (entity, comment, CDATA, `>` trong attribute, UTF-16, CJK, tiếng Việt) → snapshot term + position.
-4. **So sánh** với reference `html5ever`/`lol-html` output trên cùng input.
-5. **Round-trip** index → query cho cụm từ tiếng Việt có dấu/không dấu, CJK, cụm 4–5 từ, và cụm chứa stopword.
-6. **Resume**: kill giữa chừng index → chạy lại → DB hợp lệ, không mất sách đã xong.
-7. **Benchmark trên máy thật** 300 cuốn: đo p50/p95 query, thời gian index, **DB size thực tế** → hiệu chỉnh bảng §3.4. Đây là gate của giai đoạn 4.
-8. **Format sniff test** (v4): 1 file mẫu/format × mỗi magic trong bảng §3.0.1 → assert enum đúng. Test thêm: file đổi tên sai đuôi, file rỗng, file 3 byte, file zip bomb, file trùng magic nhưng hỏng giữa chừng.
-9. **Metadata test** (v4): mỗi format × metadata đúng field; sách thiếu metadata → `provenance = filename`; description > 4KB → `desc_truncated`; ký tự tiếng Việt/CJK trong title giữ nguyên dấu.
-10. **Metadata search test** (v4): `nguy` → `Nguyễn`, `imov` → `Asimov`, `nhật ánh` → `Nguyễn Nhật Ánh`, tên file `harry potter` → file `Harry.Potter...txt`.
-11. **Config test** (v4): sửa nhóm "rebuild" → assert `config_hash` đổi; sửa nhóm "rescan" → assert `config_hash` **không** đổi và sách mới vẫn được index. Chống hồi quy cho §3.5.3.
-12. **Prefix expansion test** (v4): index corpus chứa "chai", "chair", "chaos" nhưng **không** chứa "cha" → assert query `cha` ra cả ba, và match được đánh dấu `fuzzy`. Index corpus có chứa "cha" → assert query `cha` **không** mở rộng (exact-only). Query `cha chai` với `cha`→`{chai,chan}` → assert khớp cả "chai chai" và "chan chai" theo adjacency. Query prefix quá rộng (`a`) → assert `status = too_broad` chứ không treo.
+- **`METAIDX` loaded into RAM when there is a metadata query**: ~2–3MB compressed → ~5–6MB decompressed. LRU 1, releasable when idle.
+- `DICT` loaded into RAM ~10–15MB resident (LRU 1). The largest RAM item.
+- **Both should share a single budget** `query_arena` ~24MB; if the query does not need metadata, `METAIDX` is not loaded.
+- Per-book accumulator (hashmap term → Vec<posting>) ~5–15MB for a typical book; outlier books > 200MB of text → **flush per chunk instead of keeping everything**.
+- redb `set_cache_size(8..=16 MB)` — **redb's default is 1GiB**, which on a 512MB RAM device is a serious bug if forgotten.
+- I/O: the scan phase only `stat`s → cheap. Heavy I/O occurs on the first index pass and for snippets (cold read of 1 ZIP entry).
+- Keep the zstd buffer fixed at ~64KB, do not allocate it again on every chunk.
+- **Rewriting `METAIDX` once per session** = compressing ~5MB → ~1ms CPU, not worth worrying about. But **do not** rewrite it after every book.
 
 ---
 
-## 8. Không hỗ trợ (ghi rõ để user không bối rối)
+## 7. Testing
 
-- **KFX, CBZ, DJVU, PDF, DOCX**: không index → kết quả search sẽ không bao gồm. Không báo lỗi.
-- **MOBI/AZW3**: phase 2 (cần PalmDOC + HTML Huffdic decompression).
-- EPUB hỏng / entry khổng lồ: skip sách đó, ghi log, **không crash**.
-- Cap an toàn: mỗi entry ≤ 32MB giải nén, ≤ 2000 entry/sách, tổng ≤ 512MB (chống zip bomb).
-- Giới hạn biết trước và chấp nhận: entity bị cắt ngang giữa 2 chunk (`&am` + `p;`) có thể tạo sai 1 token rất hiếm.
-- Snippet sau L1 chậm hơn vài ms (phải quét lại ≤2048 token) — đã tính vào ngân sách ở §1.4.
-
-**Không hỗ trợ (ghi rõ để user không bối rối):**
-- **PDF / AZW4 (Print Replica) / DJVU / CBZ / CBR**: không index nội dung. User vẫn thấy sách trong thư viện KOReader bình thường; chỉ là tìm kiếm toàn văn không ra chúng. Nếu bật `meta_only_unparseable` thì vẫn tìm được theo tên file.
-- **KFX (KF10)**: container `CONT`/Ion độc quyền của Amazon — **không index trong phase 1–2**. Rất nhiều sách mua trên Amazon là KFX, nên đây là hạn chế lớn nhất; đã ghi vào lộ trình phase 3.
-- **AZW5/6/7/8**: đặt tên không nhất quán trong thực tế. Xử lý bằng magic sniff (§3.0.1), không đoán theo số hiệu.
-- **LIT / RTF / DOCX / ODT**: phase 3, hoặc opt-in qua `longtail_formats`.
-- **Sách có DRM (Kindle/Adobe)**: không index. Không crack DRM — ta chỉ đọc được file đã giải mã sẵn.
-- **CBZ/CBR**: chỉ có ảnh, không có text để index. Không chạy OCR (quá nặng cho PW3).
-- **Metadata sidecar của KOReader** (`metadata.epub.lua`): phase 3, xem §2.3.
-- **Text trong ảnh / scan**: không index (không OCR).
+1. **Property test** each coder: random `Vec<u32>` → encode → decode → equal. Elias-Fano, BIC, RLE, PForDelta, front coding, one million cases each on the host.
+2. **Compression benchmark** on the host: measure actual bits/posting for each coder using synthetic Zipf data + one real English/Vietnamese/Chinese corpus → choose the coder based on measurements, not gut feeling.
+3. **Golden test** tokenizer: 20 sample HTML/EPUB files (entity, comment, CDATA, `>` in attribute, UTF-16, CJK, Vietnamese) → snapshot term + position.
+4. **Compare** with reference `html5ever`/`lol-html` output on the same input.
+5. **Round-trip** index → query for Vietnamese phrases with and without diacritics, CJK, phrases of 4–5 words, and phrases containing a stopword.
+6. **Resume**: kill in the middle of indexing → run again → DB is valid, no completed book is lost.
+7. **Benchmark on a real device** of 300 books: measure p50/p95 query, indexing time, **actual DB size** → adjust the table in §3.4. This is the gate of phase 4.
+8. **Format sniff test** (v4): 1 sample file/format × each magic in the table at §3.0.1 → assert the enum is correct. Also test: files renamed with the wrong extension, empty files, 3-byte files, zip bombs, files with matching magic but corrupted partway through.
+9. **Metadata test** (v4): each format × metadata in the correct field; books with missing metadata → `provenance = filename`; description > 4KB → `desc_truncated`; Vietnamese/CJK characters in title preserved with diacritics.
+10. **Metadata search test** (v4): `nguy` → `Nguyễn`, `imov` → `Asimov`, `nhật ánh` → `Nguyễn Nhật Ánh`, filename `harry potter` → file `Harry.Potter...txt`.
+11. **Config test** (v4): change the "rebuild" group → assert `config_hash` changes; change the "rescan" group → assert `config_hash` does **not** change and new books are still indexed. Regression protection for §3.5.3.
+12. **Prefix expansion test** (v4): index a corpus containing "chai", "chair", "chaos" but **not** "cha" → assert the query `cha` returns all three, and that the match is marked `fuzzy`. Index a corpus that does contain "cha" → assert the query `cha` does **not** expand (exact-only). Query `cha chai` with `cha`→`{chai,chan}` → assert it matches both "chai chai" and "chan chai" by adjacency. Query with an overly broad prefix (`a`) → assert `status = too_broad` rather than hanging.
 
 ---
 
-## 9. Lộ trình
+## 8. Not supported (stated explicitly so users are not confused)
 
-| Giai đoạn | Nội dung | Định nghĩa xong | Trạng thái |
+- **KFX, CBZ, DJVU, PDF, DOCX**: not indexed → search results will not include them. No error is reported.
+- **MOBI/AZW3**: phase 2 (requires PalmDOC + HTML Huffdic decompression).
+- EPUB corrupted / oversized entry: skip that book, log it, **do not crash**.
+- Safety caps: each entry ≤ 32MB decompressed, ≤ 2000 entry/book, total ≤ 512MB (zip bomb protection).
+- Known and accepted limitation: an entity split across 2 chunks (`&am` + `p;`) may produce 1 incorrect token very rarely.
+- Snippet after L1 is a few ms slower (must rescan ≤ 2048 tokens) — already accounted for in the budget at §1.4.
+
+**Not supported (stated explicitly so users are not confused):**
+- **PDF / AZW4 (Print Replica) / DJVU / CBZ / CBR**: content is not indexed. The user still sees the books in the KOReader library as normal; it is only full-text search that does not return them. If `meta_only_unparseable` is enabled, they can still be found by filename.
+- **KFX (KF10)**: Amazon's proprietary CONT/Ion container — **not indexed in phase 1–2**. Many books purchased on Amazon are KFX, so this is the biggest limitation; it is already recorded in the phase 3 roadmap.
+- **AZW5/6/7/8**: named inconsistently in practice. Handle via magic sniff (§3.0.1), do not guess by the number.
+- **LIT / RTF / DOCX / ODT**: phase 3, or opt-in via `longtail_formats`.
+- **Books with DRM (Kindle/Adobe)**: not indexed. No DRM cracking — we can only read files that have already been decrypted.
+- **CBZ/CBR**: images only, no text to index. No OCR (too heavy for the PW3).
+- **KOReader metadata sidecar** (`metadata.epub.lua`): phase 3, see §2.3.
+- **Text inside images / scans**: not indexed (no OCR).
+
+---
+
+## 9. Roadmap
+
+| Phase | Content | Definition of done | Status |
 |---|---|---|---|
-| 1 | Cargo + module layout + 4 coder (Ef/BIC/RLE/PForDelta) + property test | Round-trip pass mỗi coder, benchmark bit/posting | ✅ **xong** — 52 test, 0 warning |
-| 1b | Real-corpus measurement (`bin/measure`) | Số đo toàn thư viện, không suy rọi | ✅ **xong** — 614 EPUB: 1,36GB→348,7MB text→index full 102,9MB |
-| 2 | redb schema + `pack` + SCAN + BOOKS/PATHS/META/CONFIG + allocate id | Detect new/update/delete đúng; id không tái sử dụng; resume cursor | ✅ **xong** — 48 integration test, 3 bug thật bị bắt |
-| 3 | **Format sniff + decoder TXT/HTML/EPUB** (magic byte + OPF spine + lol-html) | Golden test §7.3 + §7.8 pass; chạy thật trên thư viện | ✅ **xong** — 127 test; 25 section/sách, 405KB text từ 1 EPUB |
-| 4 | **Metadata: OPF + FB2 + filename + METAIDX blob + provenance** | §7.9 + §7.10 pass — tìm được sách theo tên/tác giả | ✅ **xong** — 9 integration test; **43/43** cuốn có sidecar |
-| 5 | POSTINGS + DICT/DICT_DELTA + chunk append | Kiểm tra DB size thật trên toàn thư viện vs bảng §1.1.1 | ⬜ |
-| 6 | **Decoder MOBI/AZW/AZW3** (PalmDB + PalmDOC + EXTH) | Decode đúng text + metadata của 5 file mẫu trong thư viện | ⬜ |
-| 7 | Query: phrase + prefix + rank + snippet + metadata match | p95 < 50ms trên máy thật | ⬜ |
-| 8 | FFI + build armhf + tích hợp LuaJIT | Chạy trên Kindle PW3 thật | ⬜ |
-| 9 | Budget guard, compact, UI tiến độ | Release | ⬜ |
-| 10 | Long-tail: KFX, sidecar KOReader, `longtail` feature | Optional | ⬜ |
+| 1 | Cargo + module layout + 4 coders (Ef/BIC/RLE/PForDelta) + property test | Round-trip passes for each coder, bits/posting benchmark | ✅ **done** — 52 tests, 0 warnings |
+| 1b | Real-corpus measurement (`bin/measure`) | Whole-library measurements, no extrapolation | ✅ **done** — 614 EPUBs: 1.36GB→348.7MB text→full index 102.9MB |
+| 2 | redb schema + `pack` + SCAN + BOOKS/PATHS/META/CONFIG + allocate id | Detect new/update/delete correctly; ids not reused; resume cursor | ✅ **done** — 48 integration tests, 3 real bugs caught |
+| 3 | **Format sniff + TXT/HTML/EPUB decoders** (magic byte + OPF spine + lol-html) | Golden test §7.3 + §7.8 pass; run on the real library | ✅ **done** — 127 tests; 25 sections/books, 405KB text from 1 EPUB |
+| 4 | **Metadata: OPF + FB2 + filename + METAIDX blob + provenance** | §7.9 + §7.10 pass — books findable by title/author | ✅ **done** — 9 integration tests; **43/43** books have a sidecar |
+| 5 | POSTINGS + DICT/DICT_DELTA + chunk append | Check actual DB size across the whole library vs. the table at §1.1.1 | ⬜ |
+| 6 | **MOBI/AZW/AZW3 decoders** (PalmDB + PalmDOC + EXTH) | Correctly decode text + metadata of 5 sample files in the library | ⬜ |
+| 7 | Query: phrase + prefix + rank + snippet + metadata match | p95 < 50ms on a real device | ⬜ |
+| 8 | FFI + build armhf + LuaJIT integration | Runs on a real Kindle PW3 | ⬜ |
+| 9 | Budget guard, compact, progress UI | Release | ⬜ |
+| 10 | Long-tail: KFX, KOReader sidecar, `longtail` feature | Optional | ⬜ |
 
 ---
+
 ---
+# APPENDIX — SPEC v1 (original, kept for history)
 
-# PHỤ LỤC — ĐẶC TẢ v1 (gốc, giữ để lịch sử)
-
-> Bản dưới đây là nội dung `note.md` trước khi nâng cấp. **Không còn là hướng dẫn hiện hành** — các điểm lỗi/thay đổi đã ghi ở §0.
+> The content below is the `note.md` from before the upgrade. **It is no longer the current guide** — the defects/changes are recorded in §0.
 
 ```
 check file change = inode + mtime + size
 check dir change = mtime
 ```
 
-## ĐẶC TẢ KỸ THUẬT: EMBEDDED FULL-TEXT SEARCH ENGINE TRÊN RUST CHO KOREADER
+## TECHNICAL SPEC: EMBEDDED FULL-TEXT SEARCH ENGINE IN RUST FOR KOREADER
 
-### 1. Môi trường & Ràng buộc Phần cứng
+### 1. Environment & Hardware Constraints
 
-* Thiết bị mục tiêu: Kindle Paperwhite 3 (PW3) – CPU đơn nhân ARM, RAM hạn chế (512MB - 1GB), tốc độ đọc/ghi ổ cứng (I/O) chậm.
-* Ngôn ngữ: Rust (Cross-compile sang kiến trúc ARM).
-* Database: redb (Embedded Key-Value Store, thuần Rust, dạng Single-file).
-* Mục tiêu hiệu năng: Tìm kiếm cụm từ/cả câu (Phrase Query) thời gian thực (< 50ms). Dung lượng DB chiếm dưới 3% dung lượng thư viện (Ước tính ~50MB cho 2.5GB sách).
-* Chiến lược: Không chạy daemon giám sát file ngầm (watch fs), chỉ quét thủ công khi có yêu cầu (On-demand Incremental Scan). Chấp nhận một chút dương tính giả (false positive) từ mã nguồn HTML thô để đổi lấy siêu tốc độ.
+* Target device: Kindle Paperwhite 3 (PW3) – single-core ARM CPU, limited RAM (512MB - 1GB), slow disk read/write (I/O).
+* Language: Rust (cross-compiled to the ARM architecture).
+* Database: redb (embedded key-value store, pure Rust, single-file format).
+* Performance goal: real-time phrase query (< 50ms). DB footprint under 3% of the library size (~50MB estimated for 2.5GB of books).
+* Strategy: no background file-monitoring daemon (watch fs); only manual scanning on demand (on-demand incremental scan). Accept a few false positives from raw HTML source in exchange for blazing speed.
 
-### 2. Kiến trúc Database (redb)
+### 2. Database Schema (redb)
 
-**Bảng A: BOOKS_TABLE (Quản lý Danh mục Sách)**
-* Key: book_id: u16 (Định danh duy nhất, tiết kiệm dung lượng, tối đa 65,535 cuốn).
-* Value: Cấu trúc nén dạng Byte chứa: [path: String] + [inode: u64] + [mtime: i64] + [size: u64].
-* Mục đích: Kiểm tra thay đổi file (Change Detection) siêu tốc bằng Metadata hệ thống mà không cần đọc nội dung file.
+**Table A: BOOKS_TABLE (Book Catalog Management)**
+* Key: book_id: u16 (unique identifier, saves space, up to 65,535 books).
+* Value: packed byte structure containing: [path: String] + [inode: u64] + [mtime: i64] + [size: u64].
+* Purpose: ultra-fast file change detection using system metadata without having to read file contents.
 
-**Bảng B: INVERTED_INDEX_TABLE (Chỉ mục Đảo ngược)**
-* Key: word: String (Từ khóa viết thường - lowercase).
-* Value: Mảng Byte đã được mã hóa nén: CompressedPostingsList.
-* Cấu trúc dữ liệu sau khi giải nén (Logic): Vec<(book_id: u16, positions: Vec<u32>)>.
+**Table B: INVERTED_INDEX_TABLE (Inverted Index)**
+* Key: word: String (lowercase keyword).
+* Value: compressed encoded byte array: CompressedPostingsList.
+* Data structure after decompression (logical): Vec<(book_id: u16, positions: Vec<u32>)>.
 
-### 3. Quy trình Xử lý dữ liệu (Pipeline)
+### 3. Data Processing Pipeline
 
-#### Bước 1: Quét tăng trưởng siêu tốc (Incremental Scan)
-1. Đọc mtime của thư mục sách chính. Nếu khớp với cấu hình cũ, bỏ qua toàn bộ việc quét file.
-2. Nếu thư mục có thay đổi, lặp qua các file (std::fs::read_dir), lấy nhanh bộ ba metadata (Inode, Mtime, Size).
-3. So sánh với BOOKS_TABLE: trùng khớp → bỏ qua file; thay đổi/mới → cần index; mất trên đĩa → xóa dữ liệu cũ.
+#### Step 1: Super-Fast Incremental Scan
+1. Read the mtime of the main books directory. If it matches the previously stored value, skip the entire file scan.
+2. If the directory has changed, iterate over the files (std::fs::read_dir) and quickly fetch the metadata triple (inode, mtime, size).
+3. Compare against BOOKS_TABLE: match → skip the file; changed/new → needs indexing; missing from disk → delete the old data.
 
-#### Bước 2: Tokenizer thô & Trích xuất Vị trí (Positioning)
-1. Dùng luồng đọc trực tiếp từ bộ nhớ (Memory streaming) qua crate zip, không ghi file ra đĩa flash.
-2. Sử dụng State Machine tối giản: `InTag` (bỏ qua từ `<` đến `>`), `InText` (cắt từ, lowercase).
-3. Gán chỉ số bộ đếm tăng dần (0, 1, 2, 3...) cho mỗi từ hợp lệ. Lọc bỏ stopwords.
+#### Step 2: Rough Tokenizer & Position Extraction (Positioning)
+1. Use direct streaming from memory (memory streaming) via the zip crate, without writing files to flash.
+2. Use a minimal state machine: `InTag` (skip from `<` to `>`), `InText` (split words, lowercase).
+3. Assign an increasing counter index (0, 1, 2, 3...) to each valid word. Filter out stopwords.
 
-#### Bước 3: Nén dữ liệu vị trí (Delta Encoding + VByte)
+#### Step 3: Position Data Compression (Delta Encoding + VByte)
 1. Delta Encoding: [100, 105, 120] → [100, 5, 15].
-2. Variable Byte (VByte / Varint): số < 128 chỉ tốn 1 byte.
+2. Variable Byte (VByte / Varint): numbers < 128 cost only 1 byte.
 
-### 4. Thuật toán Tìm kiếm Cụm từ / Cả câu (Phrase Query)
-1. Phân rã chuỗi: tách câu tìm kiếm thành token đơn lẻ.
-2. Truy vấn RAM: trích xuất postings list 2 từ, giải nén Delta + VByte.
-3. Positional Intersect two-pointer O(N+M): điều kiện `Position(từ_2) - Position(từ_1) = 1`.
-4. Hiển thị kết quả: trả về book_id và vị trí byte/từ, `seek()` để trích snippet.
+### 4. Phrase Query Algorithm
+1. String decomposition: split the search sentence into individual tokens.
+2. In-RAM query: fetch the postings list of 2 words, decompress Delta + VByte.
+3. Positional intersect two-pointer O(N+M): condition `Position(từ_2) - Position(từ_1) = 1`.
+4. Displaying results: return the book_id and the byte/word position, `seek()` to extract a snippet.
 
-### 5. Các Thư viện (Crates) Khuyên dùng
-* redb, zip, bstr hoặc regex
+### 5. Recommended Libraries (Crates)
+* redb, zip, bstr or regex
 
-### 3.1 Bổ sung Bộ trích xuất Text sạch (HTML Parsing Strategy)
-* Thư viện khuyến nghị: `lol-html` (Dạng Stream Tokenizer, tuyệt đối không dùng thư viện dựng DOM như `scraper`).
-1. Chỉ trích xuất nội dung văn bản (Text content) nằm bên trong thẻ `<body>`.
-2. Bỏ qua hoàn toàn (Ignore) toàn bộ thẻ và nội dung con bên trong các thẻ: `<head>`, `<style>`, `<script>`, `<meta>`.
-3. Tự động giải mã (Decode) các HTML Entities (ví dụ: biến `&nbsp;` thành khoảng trắng, `&amp;` thành `&`) trước khi đưa vào bộ đếm Vị trí (Tokenizer).
-4. Sau khi trích xuất chuỗi Text sạch, mới tiến hành gán chỉ số Position tăng dần (0, 1, 2, 3...) cho từng từ.
+### 3.1 Supplement: Clean Text Extraction (HTML Parsing Strategy)
+* Recommended library: `lol-html` (streaming tokenizer form; absolutely do not use DOM-building libraries such as `scraper`).
+1. Only extract the text content (Text content) inside the `<body>` tag.
+2. Completely ignore (Ignore) all tags and the child content inside the tags: `<head>`, `<style>`, `<script>`, `<meta>`.
+3. Automatically decode HTML entities (for example: convert `&nbsp;` into a space, `&amp;` into `&`) before feeding them into the position counter (Tokenizer).
+4. After extracting the clean text stream, then assign increasing position indices (0, 1, 2, 3...) to each word.
