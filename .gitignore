@@ -5,3 +5,10 @@
 *.redb
 .indexer.log
 .breakdown.log
+# Build artifacts: the compile-time DB sqlx macros verify against,
+# and the SQLite sidecar files of any built index.
+.env
+.sqlx-dev.db
+*.idx-shm
+*.idx-wal
+*.idx
