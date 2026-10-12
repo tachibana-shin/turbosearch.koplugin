@@ -188,12 +188,15 @@ impl<'a> Writer<'a> {
 
     /// Marks the end of a document.
     ///
-    /// Deliberately does *not* flush: writing a chunk per book is what inflated
-    /// both the chunk count and the redb pages. A crash between books loses the
-    /// unflushed tail of this one document, which the next scan re-indexes.
+    /// Deliberately does *not* flush, and does *not* write a delta row: writing
+    /// one per book meant rewriting a row for every term in the dictionary on
+    /// every book, which is quadratic in library size and cost most of a full
+    /// build. Crash recovery does not need it — `flush_term` reads the chunk
+    /// count straight off the `postings` table, so an interrupted session
+    /// resumes at the right index without any bookkeeping.
     pub fn end_document(&mut self) -> RunResult<()> {
         self.docs += 1;
-        dict::store_deltas(self.engine, &self.delta_rows())
+        Ok(())
     }
 
     /// Writes every term with pending postings.
@@ -212,7 +215,18 @@ impl<'a> Writer<'a> {
         };
         self.pending_postings -= postings.len();
 
-        let mut next = self.next_chunk.get(term).copied().unwrap_or(0);
+        // The chunk index continues from whatever is on disk. Asking the
+        // `postings` table itself — once per term per session, then cached —
+        // is what lets `end_document` stop rewriting a delta row for the whole
+        // dictionary on every book, which was quadratic in the library size.
+        let mut next = match self.next_chunk.get(term).copied() {
+            Some(n) => n,
+            None => {
+                let n = self.engine.postings_chunk_count(term)?;
+                self.next_chunk.insert(term.to_vec(), n);
+                n
+            }
+        };
         let mut writes: Vec<(u16, Vec<u8>)> =
             Vec::with_capacity(postings.len() / posting::CHUNK_POSTINGS + 1);
 

@@ -21,6 +21,7 @@ use std::time::Instant;
 use turbosearch::format::{epub, mobi, plain, sniff};
 use turbosearch::index::{EntryMap, dict, entrymap, query, writer};
 use turbosearch::storage::book::{Format, scan_scope};
+use turbosearch::storage::metadata::{BookMetaRecord, Provenance};
 use turbosearch::storage::{Engine, RunError, book::FileEntry, config::Config};
 use turbosearch::tokenize::for_each_token_spanned;
 
@@ -115,6 +116,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut failed = 0usize;
     let mut text_bytes = 0u64;
     let mut tokens = 0u64;
+    // Sub-phase timings inside "decode + index + write". Without them the only
+    // visible breakdown is decode-or-write, which is not enough to know which of
+    // the two to attack — and the answer turned out to be neither.
+    let mut t_decode = std::time::Duration::ZERO;
+    let mut t_loop = std::time::Duration::ZERO;
+    let mut t_entrymap = std::time::Duration::ZERO;
     let mut sections_total = 0usize;
     // `(book_id, metadata)` for every book, metadata-only formats included.
     let mut records: Vec<(u16, turbosearch::storage::metadata::BookMetaRecord)> = Vec::new();
@@ -132,6 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let book_id = w.documents() as u16;
+            let _t = std::time::Instant::now();
             // `FileList` never opens a book: that is the entire point of the
             // mode. Indexing 600 books costs a `read_dir` and a metadata read,
             // not 300 MB of decoded HTML.
@@ -161,19 +169,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .or_insert(0) += 1;
                 continue;
             }
-            let Ok(sections) = load_sections(&entry.path, format) else {
-                failed += 1;
-                if failed <= 5 {
-                    eprintln!("  decode {}: unreadable", entry.path.display());
+            let decoded = match load_sections(&entry.path, format) {
+                Ok(d) => d,
+                Err(e) => {
+                    failed += 1;
+                    if failed <= 5 {
+                        eprintln!("  decode {}: {e}", entry.path.display());
+                    }
+                    continue;
                 }
-                continue;
             };
-            sections_total += sections.len();
+            t_decode += _t.elapsed();
+            sections_total += decoded.sections.len();
 
             // One position counter for the whole book. Sections share it and are
             // told apart by `entry_idx`, which is what the chunk codec requires:
             // `pos_gap` is a delta, so restarting per section would make positions
             // non-monotonic within a document and corrupt the column.
+            let _t_loop = std::time::Instant::now();
             let mut position = 0u32;
             let mut section_tokens = 0u64;
             // Every section's entry map, held until the book is done. Writing
@@ -181,8 +194,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 12 000-section library pays for twelve thousand of them; one per
             // book is both cheaper and leaves the file far less fragmented,
             // which is what the final compaction has to clean up.
-            let mut maps: Vec<(u16, EntryMap)> = Vec::with_capacity(sections.len());
-            for (entry_idx, text) in sections.iter().enumerate() {
+            let mut maps: Vec<(u16, EntryMap)> = Vec::with_capacity(decoded.sections.len());
+            for (entry_idx, text) in decoded.sections.iter().enumerate() {
                 // Sections are decoded bytes; tokenizing needs text.
                 let text = String::from_utf8_lossy(text).into_owned();
                 let mut b = entrymap::Builder::new(entry_name(&entry.path, entry_idx));
@@ -227,18 +240,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 text_bytes += text.len() as u64;
             }
             tokens += section_tokens;
+            t_loop += _t_loop.elapsed();
+            let _t_em = std::time::Instant::now();
             for (entry_idx, map) in &maps {
                 writer::put_entry_map(&engine, book_id, *entry_idx, map)?;
             }
+            t_entrymap += _t_em.elapsed();
 
             w.end_document()?;
             indexed += 1;
             *counts.entry(format!("{format:?}")).or_insert(0) += 1;
 
-            // Metadata is indexed for every book, content or not: a PDF the
-            // decoder cannot read still has a title worth searching for, and it
-            // must land under the same book id the postings of readable books use.
-            let record = turbosearch::format::meta::resolve(&entry.path);
+            // Metadata for every book, content or not: a PDF the decoder cannot
+            // read still has a title worth searching for, and it must land under
+            // the same book id the postings of readable books use.
+            //
+            // Sidecar first, exactly as `meta::resolve` orders it, but the
+            // embedded half comes from the book just decoded instead of opening
+            // the file a second time.
+            let record = turbosearch::format::meta::from_sidecar(&entry.path)
+                .or_else(|| decoded.embedded.clone())
+                .unwrap_or_else(|| turbosearch::format::meta::from_filename(&entry.path));
             records.push((book_id, record));
 
             // Registering the book matters for more than listing: `METAIDX` is
@@ -253,7 +275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     mtime_ms: entry.mtime_ms,
                     inode: entry.inode,
                     format,
-                    entry_count: sections.len() as u16,
+                    entry_count: decoded.sections.len() as u16,
                     token_count: tokens as u32,
                     indexed_at_ms: now_ms(),
                     flags: 0,
@@ -309,13 +331,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("formats: {formats}");
     println!("text {text_bytes} bytes, {tokens} tokens");
     println!("phases:");
-    println!("  decode + index + write : {:>8.1?}", t_books);
+    println!("  decode                : {:>8.1?}", t_decode);
+    println!("  tokenize + index      : {:>8.1?}", t_loop);
+    println!("  entry maps            : {:>8.1?}", t_entrymap);
     println!(
-        "  metadata + metaidx     : {:>8.1?}",
+        "  postings flush + dict : {:>8.1?}",
         t_meta.saturating_sub(t_books)
     );
     println!(
-        "  compaction             : {:>8.1?}",
+        "  metadata + metaidx    : {:>8.1?}",
+        t_meta.saturating_sub(t_books)
+    );
+    println!(
+        "  compaction            : {:>8.1?}",
         t_compact.saturating_sub(t_meta)
     );
     println!("  total                  : {:>8.1?}", started.elapsed());
@@ -457,8 +485,8 @@ fn load_section_text(map: &EntryMap) -> Option<String> {
     let (path, idx) = map.name.rsplit_once('#')?;
     let idx: usize = idx.parse().ok()?;
     let format = sniff::detect(Path::new(path));
-    let sections = load_sections(Path::new(path), format).ok()?;
-    let raw = sections.get(idx)?;
+    let decoded = load_sections(Path::new(path), format).ok()?;
+    let raw = decoded.sections.get(idx)?;
     Some(String::from_utf8_lossy(raw).into_owned())
 }
 
@@ -510,25 +538,73 @@ fn tempdir_engine() -> Engine {
 }
 
 /// Loads a book's sections in reading order, as decoded text.
-fn load_sections(path: &Path, format: Format) -> Result<Vec<Vec<u8>>, RunError> {
+/// The decoded book: its sections, and the metadata that was already open.
+///
+/// The metadata comes back with the sections rather than being resolved again
+/// afterwards, because resolving it afterwards re-opens the file. That second
+/// open cost 12,5 s per 100 books on the measured library, which is a whole
+/// extra decode pass spent reading an OPF that was already in memory.
+struct Decoded {
+    sections: Vec<Vec<u8>>,
+    /// Embedded metadata, when the container carried any.
+    embedded: Option<BookMetaRecord>,
+}
+
+fn load_sections(path: &Path, format: Format) -> Result<Decoded, RunError> {
     match format {
         Format::Epub | Format::Kepub => {
             let book = epub::open(path).map_err(|e| bad(&e.to_string()))?;
-            Ok(book.sections.into_iter().map(|s| s.text).collect())
+            // The OPF is parsed by `open` anyway; turning it into the record here
+            // is what `format::meta::from_embedded` does after re-opening.
+            let embedded = (!book.metadata.title.is_empty()).then(|| {
+                let mut record =
+                    BookMetaRecord::new(book.metadata.title.clone(), book.metadata.authors.clone());
+                record.language = book.metadata.language.clone();
+                record.series = book.metadata.series.clone();
+                record.series_index = book.metadata.series_index;
+                record.set_description(book.metadata.description.clone());
+                record.identifiers = book.metadata.identifiers.clone();
+                record.publisher = book.metadata.publisher.clone();
+                record.provenance = Provenance::Embedded;
+                record
+            });
+            Ok(Decoded {
+                sections: book.sections.into_iter().map(|s| s.text).collect(),
+                embedded,
+            })
         }
         Format::Txt | Format::Markdown => {
             let bytes = std::fs::read(path).map_err(|e| bad(&e.to_string()))?;
-            Ok(plain::single_section(&bytes)
-                .map_err(|e| bad(&e.to_string()))?
-                .into_iter()
-                .map(|s| s.text)
-                .collect())
+            Ok(Decoded {
+                sections: plain::single_section(&bytes)
+                    .map_err(|e| bad(&e.to_string()))?
+                    .into_iter()
+                    .map(|s| s.text)
+                    .collect(),
+                embedded: None,
+            })
         }
         Format::Mobi | Format::Azw | Format::Azw3 => {
             let bytes = std::fs::read(path).map_err(|e| bad(&e.to_string()))?;
-            Ok(vec![
-                mobi::parse(&bytes).map_err(|e| bad(&e.to_string()))?.text,
-            ])
+            let book = mobi::parse(&bytes).map_err(|e| bad(&e.to_string()))?;
+            let embedded = (!book.metadata.title.is_empty()).then(|| {
+                let mut record =
+                    BookMetaRecord::new(book.metadata.title.clone(), book.metadata.authors.clone());
+                record.language = book.metadata.language.clone();
+                record.publisher = book.metadata.publisher.clone();
+                record.identifiers = if book.metadata.isbn.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![format!("isbn:{}", book.metadata.isbn)]
+                };
+                record.set_description(book.metadata.description.clone());
+                record.provenance = Provenance::Embedded;
+                record
+            });
+            Ok(Decoded {
+                sections: vec![book.text],
+                embedded,
+            })
         }
         _ => Err(bad("unsupported text format")),
     }

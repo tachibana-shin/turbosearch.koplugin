@@ -620,8 +620,13 @@ Measured on the reference library (614 EPUB, 303,6 MB of text, 49,9 M tokens):
 | Mode | Database | Full build |
 |---|---|---|
 | `FileList` | **0,9 MB** | 28 s |
-| `TermsOnly` | **31,8 MB** (10,5% of text) | ~500 s |
-| `Full` | **163 MB** | ~700 s |
+| `TermsOnly` | **31,8 MB** (10,5% of text) | ~110 s |
+| `Full` | **163 MB** | ~190 s |
+
+Both timings are extrapolated from a 200-book A/B, and the extrapolation is
+conservative in a way that favours the old numbers: the two fixes below scale
+with library size, so the saving grows rather than holds. `FileList` and every
+size are measured directly.
 
 > The two content timings above are extrapolated from a 200-book A/B after the
 > indexer stopped tokenizing every section twice. The `FileList` figure and every
@@ -664,6 +669,31 @@ Half the build. The lesson generalises past this bug: when a build is slower tha
 its parts, measure the parts before optimising any of them — the decoders were
 never the problem, and "zip and lol-html are already fast" was the correct
 instinct pointing at the wrong line.
+
+### 3.0.5 The indexer was resolving metadata by re-opening every book
+
+The same investigation found a second pass of the same kind. After a book was
+decoded, the indexer called `format::meta::resolve(path)`, and for a book with no
+KOReader sidecar that falls through to `from_embedded`, which calls `epub::open`
+on the file it had just decoded. Whole second decode pass, to read an OPF that
+was already in memory.
+
+`load_sections` now returns the embedded metadata alongside the sections, so the
+record is built from what `open` already parsed. Provenance is unchanged and
+checked: the same 100 books split 38 sidecar / 56 embedded / 6 filename before
+and after.
+
+A/B on 200 books, after both fixes in this section and §3.0.4:
+
+| Mode | Both bugs | Fixed |
+|---|---|---|
+| `Full` | 269,4 s | **63,1 s** |
+| `TermsOnly` | 222,1 s | **36,4 s** |
+| `FileList` | — | **3,1 s** |
+
+4,3x for `Full`. Two wasteful second passes, not the decoders, were the cost —
+which is the same conclusion twice over: measure the parts before optimising any
+of them.
 
 ### 3.1 Scan (metadata only, does not open content)
 
