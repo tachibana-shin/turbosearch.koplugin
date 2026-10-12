@@ -1147,6 +1147,8 @@ score(book) = w_meta × meta_hits × idf_meta     # title/author match — the s
 
 **Cross-compile.** Máy dev là x86-64 nhưng Kindle PW3 là armv7, nên cần **hai** bản `.so`: x86-64 test tại chỗ (KOReader desktop ở `/usr/lib/koreader`), armv7 lên máy đọc. Không có `arm-linux-gnueabihf-gcc`, dùng `cargo zigbuild --target armv7-unknown-linux-gnueabihf`.
 
+`script/build-plugin` build cho host, `script/build-plugin --arm` build armv7. Hai bản đặt cạnh nhau trong plugin dir (`libturbosearch.so` và `libturbosearch-armv7.so`) chứ **không** ghi đè lẫn nhau: plugin chọn bằng `jit.arch`, nên một bản x86-64 lọt lên Kindle sẽ fail ngay ở `ffi.load` với lỗi ELF class thay vì chạy được nửa đường. Chỉ cần copy đúng bản armv7 sang máy đọc.
+
 Crates:
 ```
 redb 2.x · zip 2.x · flate2 (miniz_oxide — pure Rust, no C zlib needed)

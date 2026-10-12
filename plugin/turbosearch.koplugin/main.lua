@@ -63,6 +63,21 @@ local function plugin_dir()
     return (source:match("(.*/)") or "./")
 end
 
+-- The engine library for the architecture LuaJIT is running on.
+--
+-- Both are built beside the plugin — the host library for the desktop reader and
+-- the armv7 one for the device — and which one loads is decided from the
+-- interpreter rather than from whichever file was left there last. An x86-64
+-- library on a Kindle fails at ffi.load with a message about the ELF class, so
+-- choosing by name is what keeps that from being a search rather than a load
+-- error.
+local function engine_name()
+    if jit.arch == "arm" then
+        return "libturbosearch-armv7.so"
+    end
+    return "libturbosearch.so"
+end
+
 --- Loads the engine and the binding, once, and remembers both.
 ---
 --- A missing index is expected rather than a bug — the reader cannot build the
@@ -76,9 +91,11 @@ local function load_engine()
     if not ok then
         return nil, T(_("Could not load the search engine: %1"), tostring(binding))
     end
-    local loaded, load_err = pcall(binding.load_lib, plugin_dir() .. "libturbosearch.so")
+    local library = plugin_dir() .. engine_name()
+    local loaded, load_err = pcall(binding.load_lib, library)
     if not loaded then
-        return nil, T(_("Could not load the search engine: %1"), tostring(load_err))
+        return nil, T(_("Could not load the search engine from %1.\n\n%2"),
+            library, tostring(load_err))
     end
     Turbosearch.binding = binding
     return binding

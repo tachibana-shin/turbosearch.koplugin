@@ -1,22 +1,42 @@
 #!/bin/bash
-# Assembles the plugin: the engine library and the compiled Lua beside the Lua
-# that defines the plugin, in one directory.
+# Assembles the plugin: the engine library and the compiled Lua, in one directory.
 #
-# Builds for the host by default, which is the machine with the KOReader
-# desktop reader on it and the only place the plugin can be tried without a
-# device.
+# Builds for the host by default, which is the machine with the KOReader desktop
+# reader on it and the only place the plugin can be tried without a device.
+# `--arm` cross-compiles for the Kindle instead.
 #
-# The artifacts are not committed. A 4 MB .so and a generated Lua file in git
-# would also mean the repository outlived the target it was built for, and this
-# builds both in one step anyway.
+# The two libraries are kept side by side rather than overwriting one name: the
+# plugin picks between them from `jit.arch`, so an x86-64 library that reaches a
+# Kindle fails at ffi.load with a message about the ELF class instead of running.
+#
+# The artifacts are not committed. A few MB of .so in git would also mean the
+# repository outlived the target it was built for, and this assembles both in
+# one step anyway.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PLUGIN="plugin/turbosearch.koplugin"
-LIB="libturbosearch.so"
 
-cargo build --release
-cp "target/release/$LIB" "$PLUGIN/$LIB"
+case "${1:-}" in
+    --arm)
+        TARGET="armv7-unknown-linux-gnueabihf"
+        LIB="libturbosearch-armv7.so"
+        echo "building for armv7" >&2
+        cargo zigbuild --target "$TARGET" --release
+        cp "target/$TARGET/release/libturbosearch.so" "$PLUGIN/$LIB"
+        ;;
+    "")
+        LIB="libturbosearch.so"
+        echo "building for the host" >&2
+        cargo build --release
+        cp "target/release/libturbosearch.so" "$PLUGIN/$LIB"
+        ;;
+    *)
+        echo "usage: script/build-plugin [--arm]" >&2
+        exit 2
+        ;;
+esac
+
 ./script/lua-build
 
-echo "built $PLUGIN"
+echo "built $PLUGIN ($LIB)"
