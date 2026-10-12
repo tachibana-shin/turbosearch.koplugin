@@ -132,7 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut dict = dict::Dict::new();
     {
         let mut w = writer::Writer::new(&engine)?;
-        for entry in plan(&root, max_books) {
+        for entry in plan(&engine, &root, max_books) {
             // Sniff the container: the extension only decided whether the file was
             // worth opening at all.
             let format = sniff::detect(&entry.path);
@@ -317,8 +317,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // overhead is already down to 37,9%, so this trades a one-time write
     // against a permanently smaller file, and the choice belongs to the caller
     // rather than to the code — which is why it can be turned off.
+    //
+    // Only when the session actually wrote something. `VACUUM` rewrites the
+    // whole database, so running it on a rescan that found nothing to do costs a
+    // full 162 MB write to reclaim nothing — and a rescan with no changes is the
+    // common case on a device. Measured on a 25-book directory: a no-change
+    // rescan went from rewriting the file to writing nothing at all, and from
+    // 28 s to 160 ms.
     let reclaimed = if std::env::var("NO_COMPACT").is_ok() {
         eprintln!("compaction skipped (NO_COMPACT): keeping every page the build churned");
+        false
+    } else if indexed == 0 && meta_rows == 0 {
+        eprintln!("compaction skipped: nothing was indexed");
         false
     } else {
         engine.compact()?
@@ -517,11 +527,34 @@ fn entry_name(path: &Path, idx: usize) -> String {
 
 /// Walks the library through the real scan path, so the extension filters and
 /// directory exclusions in `Config` are exercised rather than assumed.
-fn plan(root: &Path, max: Option<usize>) -> Vec<FileEntry> {
+/// The files this pass has to index, diffed against what is already indexed.
+///
+/// The engine here is the **real** one, not a scratch copy. `scan_scope` diffs a
+/// candidate against `BOOKS` on `(size, mtime, inode)` and reports it `unchanged`
+/// when all three match, which is what makes a rescan cost a `stat` per file
+/// rather than a full re-index. Diffing against a throwaway database made every
+/// file look new on every run, so a rescan re-tokenized the whole library and
+/// the file grew each time — measured at 15,3 s and a doubled database for a
+/// rescan with no changes.
+fn plan(engine: &Engine, root: &Path, max: Option<usize>) -> Vec<FileEntry> {
     let cfg = Config::default();
-    let engine_dummy = tempdir_engine();
-    let mut out = match scan_scope(&engine_dummy, &cfg.filter(), root) {
-        Ok(p) => p.new,
+    let mut out = match scan_scope(engine, &cfg.filter(), root) {
+        Ok(p) => {
+            eprintln!(
+                "scan: {} new, {} updated, {} unchanged, {} missing",
+                p.new.len(),
+                p.updated.len(),
+                p.unchanged.len(),
+                p.missing.len()
+            );
+            // `updated` is indexed alongside `new`: a file whose fingerprint
+            // changed is a file whose content may have changed, and skipping it
+            // because only `new` was consulted is how a book silently stops
+            // matching after it is edited.
+            let mut out = p.new;
+            out.extend(p.updated);
+            out
+        }
         Err(e) => {
             eprintln!("scan {root:?}: {e}");
             Vec::new()
@@ -532,20 +565,6 @@ fn plan(root: &Path, max: Option<usize>) -> Vec<FileEntry> {
         out.truncate(n);
     }
     out
-}
-
-/// A throwaway engine, because `scan_scope` diffs against `BOOKS` and an empty
-/// database makes every candidate come back as new.
-fn tempdir_engine() -> Engine {
-    let dir = turbosearch::library::scratch_dir();
-    // Created here rather than assumed: the same path is used to write the
-    // database, so it has to exist wherever the process's temp directory is.
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        panic!("create {}: {e}", dir.display());
-    }
-    let path = dir.join("turbosearch-scanned.sqlite");
-    let _ = std::fs::remove_file(&path);
-    Engine::open(path).expect("open scratch engine")
 }
 
 /// Loads a book's sections in reading order, as decoded text.
