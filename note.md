@@ -77,7 +77,7 @@ lib.rs
 | 28 | Queries match full terms only | **Fallback prefix expansion** (§4.1.1): a term absent from `DICT` is expanded into a prefix | Typing `cha` and not getting `chai` — on a PW3 keyboard, typing part of a word is the dominant behavior, not an edge case |
 | 29 | None | `prefix_search_mode` (`auto`/`exact`/`prefix`) + a `fuzzy` flag + surfacing to the user that the term was expanded | Without that signal the user cannot understand why typing `cha` returns books that do not contain the string "cha" |
 | 30 | All size figures are estimates (±50%) | **Real measurements on 614 EPUBs** (§1.1.1): 1,36GB EPUB → 348,7MB text → 56,3M token → **full positional index 102,9MB (7,6% EPUB)** | Gate §7.7 has run. The old crude extrapolation inflated by ~5,8× because it guessed token/library density wrong |
-| 31 | The proposed "2 tiers + verification" architecture out of fear the index would be too large | **Not needed** — full positional is only 102,9MB. Only necessary above a library of > ~3,5GB | Do not add complexity when the measurements show it is unnecessary |
+| 31 | The proposed "2 tiers + verification" architecture out of fear the index would be too large | **Not needed for this library** — the measured database is 264,8MB. Reconsider above a library of ~3,5GB, where it would reach ~660MB | Do not add complexity while the measured cost fits the budget; the 102,9MB column payload was the wrong number to reason from |
 | 32 | `zstd-19` for the build path | **`zstd` level 3** (§3.4 L3): 6,5s vs 512s on 348,7MB, only 32% bigger than level 19 | Level 19 on Cortex-A9 costs 1,5–3 hours per build |
 | 33 | redb "2.x" | **redb 4.3.0** (API verified): `Builder::set_cache_size()`, key/value of `(&[u8], u16)`, **no native compression** | The crate has moved to 4.x; `set_cache_size` exists only on `Builder`, `len()` only on *untyped* tables, and `iter().next()` returns `Option<Result<..>>` |
 | 34 | "reading a table that was never created = an error" | **`TableDoesNotExist` = an empty table**, handled centrally in `storage::or_empty()` | A newly created DB or a user who has not enabled indexing is a normal state, not an error |
@@ -275,15 +275,46 @@ without extrapolating (`cargo run --release --bin measure`):
 | Token = posting (including stopword) | **56,3 million** |
 | Distinct terms | 70.600 |
 | Dictionary (front-coded) | **401 KB** |
-| **Full positional index** | **102,9 MB = 7,6% of EPUB** |
+| **Full positional index — column payload** | **102,9 MB = 7,6% of EPUB** |
 
 Build performance (x86 host, to infer the order of magnitude on PW3):
 - Extract 614 books: **63 s**
 - Encode full index: **5,2 s**
 
-**Conclusion: option (a) is entirely feasible.** With a 1,36GB library, the full index is only 102,9MB
-on the ~2,7GB user partition of the PW3. The only condition is that the library not exceed
-**~3,5GB** (102,9MB × 3,5/1,36 ≈ 265MB), still within the §1.2 budget.
+> **Read the last row carefully: it is the codec payload, not the size of the
+> database.** `measure.rs` runs the column coders directly and sums their output,
+> so the figure covers `POSTINGS` values only. It does not cover redb's B-tree
+> pages, and redb's page size is fixed at 4 KiB (`Builder::set_page_size` is
+> `#[cfg(test)]` in redb 4.x, so it cannot be raised for a release build).
+>
+> The same library measured **end to end**, through the real writer and
+> `compact()` — 619 books, 12 409 sections, 49,9 M tokens:
+>
+> | Item | Measured |
+> |---|---|
+> | Column payload (the row above) | **88,8 MB** |
+> | Value bytes across all tables | **~91,5 MB** |
+> | **Database file after compaction** | **264,8 MB = 87,2% of extracted text** |
+> | Chunks | 71 619 over 62 663 terms |
+>
+> The gap is B-tree page overhead for 71 619 rows: redb cannot be told to fit
+> more values per page, so the only lever is making each value smaller. zstd on
+> a chunk barely helps, because the columns are already entropy coded.
+>
+> Two consequences, both measured rather than argued:
+> - the §1.2 budget is still met (264,8 MB for a 1,36 GB library, well inside
+>   25%), so option (a) remains feasible — but on this library it costs **~5x**
+>   the codec payload, and that factor does not shrink with the library;
+> - the index-to-library ratio to plan against is **~19% of the EPUB folder**,
+>   not the 7,6% this row was previously read as.
+
+**Conclusion: option (a) is still feasible, but not at the cost quoted above.** The measured
+database for this library is 264,8MB, not 102,9MB, so the per-GB figure to plan with is
+**~19% of the EPUB folder** rather than 7,6%. That still fits the ~2,7GB user partition of a
+PW3 for any realistic library, and the 25% disk budget is nowhere near reached (264,8MB against
+340MB for this one), so the ceiling in practice is the partition itself rather than §1.2. What
+changed is the design pressure: a library of ~3,5GB would produce a ~660MB index, which is where
+the "2 tiers + verification" architecture stopped being optional.
 
 Effect of keeping positions (`cap` = max number of positions per (term, book)):
 
