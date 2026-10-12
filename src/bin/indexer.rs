@@ -88,6 +88,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // `pos_gap` is a delta, so restarting per section would make positions
             // non-monotonic within a document and corrupt the column.
             let mut position = 0u32;
+            // Every section's entry map, held until the book is done. Writing
+            // them one at a time is one transaction per section, and a
+            // 12 000-section library pays for twelve thousand of them; one per
+            // book is both cheaper and leaves the file far less fragmented,
+            // which is what the final compaction has to clean up.
+            let mut maps: Vec<(u16, Vec<u8>)> = Vec::with_capacity(sections.len());
             for (entry_idx, text) in sections.iter().enumerate() {
                 // Sections are decoded bytes; tokenizing needs text.
                 let text = String::from_utf8_lossy(text).into_owned();
@@ -98,11 +104,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     b.offer(p, start as u32);
                     let _ = w.add(term, book_id as u32, p, entry_idx as u16);
                 });
-                writer::put_entry_map(&engine, book_id, entry_idx as u16, &b.finish())?;
+                maps.push((entry_idx as u16, b.finish().encode()));
 
                 text_bytes += text.len() as u64;
                 tokens += tokenize::tokenize(&text).len() as u64;
             }
+            engine.write_batch(|txn| {
+                let mut t = txn.open_table(turbosearch::storage::entrymap_table())?;
+                for (entry_idx, blob) in &maps {
+                    t.insert((book_id, *entry_idx), blob.as_slice())?;
+                }
+                Ok(())
+            })?;
 
             w.end_document()?;
             indexed += 1;
@@ -117,7 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Registering the book matters for more than listing: `METAIDX` is
             // rebuilt from `METADATA` rows *that have a live `BOOKS` row*, so a
             // book omitted here would silently vanish from every metadata search.
-            engine.put_book(
+            engine.put_book_batch(
                 book_id,
                 &turbosearch::storage::book::Book {
                     path: entry.path.to_string_lossy().into_owned(),
@@ -135,12 +148,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         w.close(&mut dict)?;
     }
+    let t_books = started.elapsed();
 
     let mut meta_rows = 0usize;
     for (book_id, record) in &records {
-        engine.put_metadata(*book_id, record)?;
+        engine.put_metadata_batch(*book_id, record)?;
         meta_rows += 1;
     }
+    // Everything above with `*_batch` is parked in memory until one durable
+    // commit. `rebuild_index` below reads those rows, and the non-durable commit
+    // is visible to it inside this process, but the file on disk still needs the
+    // flush before compaction rewrites it.
+    engine.flush()?;
     let index = turbosearch::storage::metadata::rebuild_index(&engine)?;
     engine.put_meta_index(&index)?;
     println!(
@@ -150,8 +169,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Compact once the writer is gone, so the file does not carry every page the
     // session churned through. A fresh index that skips this measured 69% free
     // space, which is three times the data it holds.
+    let t_meta = started.elapsed();
     let reclaimed = engine.compact()?;
     let size_after_compact = engine.file_size();
+    let t_compact = started.elapsed();
 
     println!(
         "indexed {indexed} books ({sections_total} sections), skipped {skipped}, failed {failed}"
@@ -163,7 +184,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .join(" ");
     println!("formats: {formats}");
     println!("text {text_bytes} bytes, {tokens} tokens");
-    println!("elapsed {:.1?}", started.elapsed());
+    println!("phases:");
+    println!("  decode + index + write : {:>8.1?}", t_books);
+    println!(
+        "  metadata + metaidx     : {:>8.1?}",
+        t_meta.saturating_sub(t_books)
+    );
+    println!(
+        "  compaction             : {:>8.1?}",
+        t_compact.saturating_sub(t_meta)
+    );
+    println!("  total                  : {:>8.1?}", started.elapsed());
     let size = size_after_compact;
     println!(
         "compaction reclaimed free pages: {}",

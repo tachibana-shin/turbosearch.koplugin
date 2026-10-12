@@ -314,6 +314,19 @@ impl Engine {
         })
     }
 
+    /// [`Engine::put_metadata`] without the fsync, for bulk loads.
+    ///
+    /// A durable commit here costs about 160 ms on a real disk, which is the
+    /// difference between an indexing session finishing and not.
+    pub fn put_metadata_batch(&self, book_id: u16, record: &BookMetaRecord) -> RunResult<()> {
+        let bytes = record.encode();
+        self.write_batch(|txn| {
+            txn.open_table(metadata_table())?
+                .insert(book_id, bytes.as_slice())?;
+            Ok(())
+        })
+    }
+
     /// Drops a metadata record when its book is removed.
     pub fn remove_metadata(&self, book_id: u16) -> RunResult<()> {
         self.write(|txn| {

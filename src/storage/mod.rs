@@ -204,6 +204,22 @@ impl Engine {
         })
     }
 
+    /// [`Engine::put_book`] without the fsync, for bulk loads.
+    ///
+    /// Same transaction shape, so the two tables still cannot disagree; the
+    /// caller finishes with [`Engine::flush`] to make the batch durable.
+    pub fn put_book_batch(&self, id: u16, b: &Book) -> RunResult<()> {
+        let bytes = b.encode();
+        let path = b.path.clone();
+        self.write_batch(|txn| {
+            txn.open_table(book::books_table())?
+                .insert(id, bytes.as_slice())?;
+            txn.open_table(book::paths_table())?
+                .insert(path.as_str(), id)?;
+            Ok(())
+        })
+    }
+
     /// Drops a `BOOKS` row and its `PATHS` entry, orphaning its postings.
     ///
     /// Deletion is O(1) precisely because we do not touch the postings here:
