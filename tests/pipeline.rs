@@ -12,20 +12,30 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use redb::ReadableTable;
 use turbosearch::format::{epub, mobi, plain, sniff};
-use turbosearch::index::{entrymap, query, writer, Dict, EntryMap};
+use turbosearch::index::{Dict, EntryMap, entrymap, query, writer};
+use turbosearch::storage::Engine;
 use turbosearch::storage::book::Format;
 use turbosearch::storage::config::Config;
 use turbosearch::tokenize::for_each_token_spanned;
-use redb::ReadableTable;
-use turbosearch::storage::Engine;
 
-const LIBRARY: &str = "/home/shin/.config/koreader/rakuyomi/downloads/calibre";
+/// The reference library, resolved through `library` so this test suite runs
+/// anywhere that has a KOReader library and skips anywhere that does not. The
+/// `TURBOSEARCH_LIBRARY` variable points at one explicitly.
+fn library_root() -> Option<std::path::PathBuf> {
+    turbosearch::library::root()
+}
 
 /// Every file in the library, in a stable order.
+///
+/// Empty when there is no library, which every caller in this file treats as
+/// "skip" rather than as a failure.
 fn library_files() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(LIBRARY) {
+    if let Some(root) = library_root()
+        && let Ok(entries) = std::fs::read_dir(&root)
+    {
         for e in entries.flatten() {
             let p = e.path();
             if p.is_file() {
@@ -98,9 +108,14 @@ fn index_files(files: &[std::path::PathBuf]) -> Option<(Engine, Dict, tempfile::
 
 fn load_sections(path: &Path, format: Format) -> Option<Vec<Vec<u8>>> {
     match format {
-        Format::Epub | Format::Kepub => {
-            Some(epub::open(path).ok()?.sections.into_iter().map(|s| s.text).collect())
-        }
+        Format::Epub | Format::Kepub => Some(
+            epub::open(path)
+                .ok()?
+                .sections
+                .into_iter()
+                .map(|s| s.text)
+                .collect(),
+        ),
         Format::Txt | Format::Markdown => {
             let bytes = std::fs::read(path).ok()?;
             Some(
@@ -142,6 +157,7 @@ fn sample(limit: usize) -> Vec<std::path::PathBuf> {
 }
 
 #[test]
+#[ignore = "needs a reference library: set TURBOSEARCH_LIBRARY"]
 fn every_book_in_the_sample_indexes_and_is_queryable() {
     let files = sample(6);
     if files.is_empty() {
@@ -155,7 +171,11 @@ fn every_book_in_the_sample_indexes_and_is_queryable() {
 
     // The index must be non-trivial: this is the check that the whole chain
     // produced something rather than silently writing nothing.
-    assert!(dict.len() > 100, "expected a real dictionary, got {} terms", dict.len());
+    assert!(
+        dict.len() > 100,
+        "expected a real dictionary, got {} terms",
+        dict.len()
+    );
 
     // Every term must decode. A chunk that fails to decode is invisible to
     // search, which is the failure mode that once cost a whole library of
@@ -177,6 +197,7 @@ fn every_book_in_the_sample_indexes_and_is_queryable() {
 }
 
 #[test]
+#[ignore = "needs a reference library: set TURBOSEARCH_LIBRARY"]
 fn a_vietnamese_phrase_matches_the_accented_source() {
     let files = sample(6);
     if files.is_empty() {
@@ -204,7 +225,9 @@ fn a_vietnamese_phrase_matches_the_accented_source() {
             if *book != hit.doc_id as u16 {
                 continue;
             }
-            let Some(text) = section_text(map) else { continue };
+            let Some(text) = section_text(map) else {
+                continue;
+            };
             let (pos, byte_off) = map.checkpoint_for(hit.first_position);
             let Some(off) = query::locate(&text, pos, byte_off, hit.first_position) else {
                 continue;
@@ -230,6 +253,7 @@ fn a_vietnamese_phrase_matches_the_accented_source() {
 }
 
 #[test]
+#[ignore = "needs a reference library: set TURBOSEARCH_LIBRARY"]
 fn the_same_query_with_and_without_diacritics_agrees() {
     let files = sample(6);
     if files.is_empty() {
@@ -251,6 +275,7 @@ fn the_same_query_with_and_without_diacritics_agrees() {
 }
 
 #[test]
+#[ignore = "needs a reference library: set TURBOSEARCH_LIBRARY"]
 fn mobi_books_are_indexed_alongside_epub() {
     // The library holds both formats, and a MOBI book decodes through a
     // completely different path (PalmDB, not ZIP). If it indexed nothing, the
@@ -269,7 +294,11 @@ fn mobi_books_are_indexed_alongside_epub() {
         return;
     };
 
-    assert!(dict.len() > 20, "a MOBI must yield terms, got {}", dict.len());
+    assert!(
+        dict.len() > 20,
+        "a MOBI must yield terms, got {}",
+        dict.len()
+    );
 
     // Titles extracted from the PalmDB EXTH block must be real text, not
     // mojibake: this is the check that LZ77 decompression is right.
@@ -285,6 +314,7 @@ fn mobi_books_are_indexed_alongside_epub() {
 }
 
 #[test]
+#[ignore = "needs a reference library: set TURBOSEARCH_LIBRARY"]
 fn a_user_configured_extension_is_indexed_and_an_excluded_one_is_not() {
     // The request was to let users add extensions rather than being stuck with
     // the built-in list, so the list has to drive what gets decoded.
@@ -311,7 +341,11 @@ fn a_user_configured_extension_is_indexed_and_an_excluded_one_is_not() {
     let mut configured = default_config.clone();
     configured.include_extensions.push("bookz".to_string());
     assert!(configured.accepts_extension("bookz"));
-    assert_eq!(sniff::detect(&custom), Format::Epub, "contents must win over the name");
+    assert_eq!(
+        sniff::detect(&custom),
+        Format::Epub,
+        "contents must win over the name"
+    );
 
     // An excluded extension is refused even though the bytes are a real book.
     let mut excluding = default_config.clone();
@@ -324,6 +358,7 @@ fn a_user_configured_extension_is_indexed_and_an_excluded_one_is_not() {
 }
 
 #[test]
+#[ignore = "needs a reference library: set TURBOSEARCH_LIBRARY"]
 fn metadata_search_finds_books_by_author() {
     // Metadata is a first-class index, not decoration on the content index:
     // searching an author's name must find their books, including ones whose
@@ -367,6 +402,7 @@ fn metadata_search_finds_books_by_author() {
 }
 
 #[test]
+#[ignore = "needs a reference library: set TURBOSEARCH_LIBRARY"]
 fn pdf_files_contribute_metadata_but_no_content() {
     // The library holds PDFs, which carry text we cannot decode. They must
     // still be recognised as files, and must not be treated as text.
@@ -381,12 +417,20 @@ fn pdf_files_contribute_metadata_but_no_content() {
         return;
     }
     for pdf in pdfs.iter().take(3) {
-        assert!(!sniff::detect(pdf).is_text(), "{} must not be text", pdf.display());
-        assert!(load_sections(pdf, Format::Pdf).is_none(), "no sections for a PDF");
+        assert!(
+            !sniff::detect(pdf).is_text(),
+            "{} must not be text",
+            pdf.display()
+        );
+        assert!(
+            load_sections(pdf, Format::Pdf).is_none(),
+            "no sections for a PDF"
+        );
     }
 }
 
 #[test]
+#[ignore = "needs a reference library: set TURBOSEARCH_LIBRARY"]
 fn junk_extensions_are_never_opened() {
     // `.log`, `.lua`, calibre's own config files: the request was to skip these.
     let files = library_files();
@@ -421,9 +465,9 @@ fn junk_extensions_are_never_opened() {
 fn all_maps(engine: &Engine) -> Vec<(u16, u16, EntryMap)> {
     engine
         .read(|txn| {
-            let t = match turbosearch::storage::or_empty(txn.open_table(
-                turbosearch::storage::entrymap_table(),
-            ))? {
+            let t = match turbosearch::storage::or_empty(
+                txn.open_table(turbosearch::storage::entrymap_table()),
+            )? {
                 Some(t) => t,
                 None => return Ok(Vec::new()),
             };
@@ -452,6 +496,7 @@ fn section_text(map: &EntryMap) -> Option<String> {
 /// depends on the library; a regression that doubles the format is what this
 /// is here to catch.
 #[test]
+#[ignore = "needs a reference library: set TURBOSEARCH_LIBRARY"]
 fn index_size_stays_bounded_for_the_sample() {
     let files = sample(6);
     if files.is_empty() {
@@ -485,6 +530,7 @@ fn index_size_stays_bounded_for_the_sample() {
 
 /// Cross-checks that the format map used by the indexer agrees with the sniffer.
 #[test]
+#[ignore = "needs a reference library: set TURBOSEARCH_LIBRARY"]
 fn the_sniffers_and_the_decoders_agree_on_every_real_file() {
     let files = library_files();
     let formats: BTreeMap<String, usize> = files

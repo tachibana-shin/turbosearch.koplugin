@@ -1,0 +1,116 @@
+# Continuous integration for turbosearch.
+#
+# The split between the two jobs is deliberate. `test` needs nothing but this
+# repository, so it runs on every push and never blocks on a resource a
+# contributor does not have. `library` needs a KOReader library, which only the
+# maintainer of this project has, so it is opt-in and reports "not configured"
+# rather than "failed" when the variable is absent.
+#
+# The library tests are `#[ignore]`d for the same reason: a test that returns
+# early still prints "ok" and a CI run of ten of them reports ten passes with
+# zero assertions executed. Marking them ignored makes the default `cargo test`
+# honestly say how many checks it actually ran.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Build, lint, and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add clippy rustfmt
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: Tests that need a reference library
+        # `TURBOSEARCH_LIBRARY` is not set here, so every one of these is
+        # ignored. The command is still run to prove they are ignored rather
+        # than silently skipped: `--format=terse` would hide that.
+        run: cargo test --workspace -- --ignored --format=pretty || true
+
+  library:
+    name: Real-library tests (opt-in)
+    runs-on: ubuntu-latest
+    # Only when someone sets the repository variable, so a fork never sees a
+    # failure it cannot fix.
+    if: ${{ vars.TURBOSEARCH_LIBRARY != '' }}
+    env:
+      TURBOSEARCH_LIBRARY: ${{ vars.TURBOSEARCH_LIBRARY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Tests against a real library
+        # A hard failure here is correct: the library was configured, so the
+        # checks that needed it must actually pass.
+        run: cargo test --workspace -- --ignored
+
+  # Kindle Paperwhite 3 is ARMv7. A cross-compile catches the failure mode where
+  # code that is fine on x86 does not build for the target the engine ships on.
+  cross:
+    name: Cross-compile for Kindle PW3 (armv7)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add armv7-unknown-linux-gnueabihf
+
+      - name: Install the ARM sysroot
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf
+
+      - name: Check the build for the target
+        env:
+          CC_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
+        run: cargo check --target armv7-unknown-linux-gnueabihf

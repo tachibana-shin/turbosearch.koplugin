@@ -146,7 +146,15 @@ impl Dict {
             e.chunk_count += chunks;
         } else {
             self.terms.insert(i, term.to_vec());
-            self.entries.insert(i, DictEntry { df, tf, chunk_count: chunks, flags: 0 });
+            self.entries.insert(
+                i,
+                DictEntry {
+                    df,
+                    tf,
+                    chunk_count: chunks,
+                    flags: 0,
+                },
+            );
         }
     }
 
@@ -211,9 +219,7 @@ impl Dict {
         }
         let coded_len = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize;
         let stats_len = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]) as usize;
-        let coded = raw
-            .get(8..8 + coded_len)
-            .ok_or(DictError::Truncated)?;
+        let coded = raw.get(8..8 + coded_len).ok_or(DictError::Truncated)?;
         let stats = raw
             .get(8 + coded_len..8 + coded_len + stats_len)
             .ok_or(DictError::Truncated)?;
@@ -225,9 +231,15 @@ impl Dict {
         for _ in &terms {
             let df = vbyte::read_leb128(stats, &mut pos).map_err(|_| DictError::Truncated)?;
             let tf = vbyte::read_leb128(stats, &mut pos).map_err(|_| DictError::Truncated)?;
-            let chunk_count = vbyte::read_leb128(stats, &mut pos).map_err(|_| DictError::Truncated)?;
+            let chunk_count =
+                vbyte::read_leb128(stats, &mut pos).map_err(|_| DictError::Truncated)?;
             let flags = vbyte::read_leb128(stats, &mut pos).map_err(|_| DictError::Truncated)?;
-            entries.push(DictEntry { df, tf, chunk_count, flags: u16::try_from(flags).unwrap_or(0) });
+            entries.push(DictEntry {
+                df,
+                tf,
+                chunk_count,
+                flags: u16::try_from(flags).unwrap_or(0),
+            });
         }
 
         Ok(Self { terms, entries })
@@ -291,9 +303,8 @@ pub fn load(engine: &Engine) -> LoadResult<Dict> {
         let table = crate::storage::dict_table();
         match txn.open_table(table) {
             Ok(t) => match t.get(DICT_KEY) {
-                Ok(Some(v)) => Dict::decode(v.value()).map_err(|e| {
-                    crate::storage::RunError::Message(format!("dictionary: {e}"))
-                }),
+                Ok(Some(v)) => Dict::decode(v.value())
+                    .map_err(|e| crate::storage::RunError::Message(format!("dictionary: {e}"))),
                 _ => Ok(Dict::new()),
             },
             // Table not yet created: nothing indexed.
@@ -397,11 +408,51 @@ mod tests {
 
     fn sample() -> Dict {
         let mut d = Dict::new();
-        d.insert(b"sherlock", DictEntry { df: 12, tf: 340, chunk_count: 1, flags: 0 });
-        d.insert(b"sherlockian", DictEntry { df: 2, tf: 9, chunk_count: 1, flags: 0 });
-        d.insert(b"sherries", DictEntry { df: 5, tf: 30, chunk_count: 1, flags: 0 });
-        d.insert(b"th\xc3\xa1m", DictEntry { df: 64, tf: 900, chunk_count: 2, flags: 0 });
-        d.insert(b"th\xc6\xb0", DictEntry { df: 3, tf: 20, chunk_count: 1, flags: FLAG_PARTIAL });
+        d.insert(
+            b"sherlock",
+            DictEntry {
+                df: 12,
+                tf: 340,
+                chunk_count: 1,
+                flags: 0,
+            },
+        );
+        d.insert(
+            b"sherlockian",
+            DictEntry {
+                df: 2,
+                tf: 9,
+                chunk_count: 1,
+                flags: 0,
+            },
+        );
+        d.insert(
+            b"sherries",
+            DictEntry {
+                df: 5,
+                tf: 30,
+                chunk_count: 1,
+                flags: 0,
+            },
+        );
+        d.insert(
+            b"th\xc3\xa1m",
+            DictEntry {
+                df: 64,
+                tf: 900,
+                chunk_count: 2,
+                flags: 0,
+            },
+        );
+        d.insert(
+            b"th\xc6\xb0",
+            DictEntry {
+                df: 3,
+                tf: 20,
+                chunk_count: 1,
+                flags: FLAG_PARTIAL,
+            },
+        );
         d
     }
 
@@ -427,17 +478,30 @@ mod tests {
     fn encoding_is_smaller_than_the_raw_terms_for_a_realistic_dictionary() {
         // Front coding plus zstd should land well under the raw byte count.
         let mut d = Dict::new();
-        for family in [b"sher".as_slice(), b"th\xc3\xa1m".as_slice(), b"ch".as_slice()] {
+        for family in [
+            b"sher".as_slice(),
+            b"th\xc3\xa1m".as_slice(),
+            b"ch".as_slice(),
+        ] {
             for i in 0..200u32 {
                 let term = format!("{}{}", String::from_utf8_lossy(family), i);
                 d.insert(
                     term.as_bytes(),
-                    DictEntry { df: i % 50 + 1, tf: i * 3, chunk_count: 1, flags: 0 },
+                    DictEntry {
+                        df: i % 50 + 1,
+                        tf: i * 3,
+                        chunk_count: 1,
+                        flags: 0,
+                    },
                 );
             }
         }
         let raw: usize = d.terms.iter().map(|t| t.len() + 4).sum();
-        assert!(d.encode().len() < raw / 2, "{} bytes vs raw {raw}", d.encode().len());
+        assert!(
+            d.encode().len() < raw / 2,
+            "{} bytes vs raw {raw}",
+            d.encode().len()
+        );
     }
 
     #[test]
@@ -480,7 +544,15 @@ mod tests {
     #[test]
     fn insert_keeps_the_dictionary_sorted() {
         let mut d = sample();
-        d.insert(b"abyss", DictEntry { df: 1, tf: 4, chunk_count: 1, flags: 0 });
+        d.insert(
+            b"abyss",
+            DictEntry {
+                df: 1,
+                tf: 4,
+                chunk_count: 1,
+                flags: 0,
+            },
+        );
         let mut sorted = d.terms().to_vec();
         sorted.sort();
         assert_eq!(&d.terms(), &sorted);
@@ -489,7 +561,15 @@ mod tests {
     #[test]
     fn insert_updates_in_place_rather_than_duplicating() {
         let mut d = sample();
-        d.insert(b"sherlock", DictEntry { df: 99, tf: 999, chunk_count: 3, flags: 0 });
+        d.insert(
+            b"sherlock",
+            DictEntry {
+                df: 99,
+                tf: 999,
+                chunk_count: 3,
+                flags: 0,
+            },
+        );
         assert_eq!(d.len(), 5);
         assert_eq!(d.get(b"sherlock").unwrap().df, 99);
     }

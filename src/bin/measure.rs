@@ -27,11 +27,14 @@ struct Corpus {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = PathBuf::from(
-        std::env::args()
-            .nth(1)
-            .unwrap_or_else(|| "/home/shin/.config/koreader/rakuyomi/downloads/calibre".to_string()),
-    );
+    let root = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| {
+        // The reference library, resolved through `library` so the path is
+        // found on any machine that has one, rather than one developer's.
+        turbosearch::library::root()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .to_string_lossy()
+            .into_owned()
+    }));
     let zstd_levels: Vec<i32> = std::env::args()
         .nth(2)
         .map(|s| s.split(',').filter_map(|x| x.parse().ok()).collect())
@@ -85,8 +88,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== EXTRACTION (whole library, no extrapolation) ===");
     println!("books indexed   : {}", corpus.books);
     println!("books skipped   : {skipped}");
-    println!("raw text bytes  : {} ({})", text_bytes, fmt_bytes(text_bytes));
-    println!("avg text / book : {} KB", text_bytes / corpus.books.max(1) as u64 / 1024);
+    println!(
+        "raw text bytes  : {} ({})",
+        text_bytes,
+        fmt_bytes(text_bytes)
+    );
+    println!(
+        "avg text / book : {} KB",
+        text_bytes / corpus.books.max(1) as u64 / 1024
+    );
     println!("tokens          : {} ({} M)", tokens, tokens / 1_000_000);
 
     let terms: Vec<&[u8]> = {
@@ -100,8 +110,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let refs: Vec<&[u8]> = terms.clone();
     let dict_fc = front::encode(&refs).len();
-    println!("distinct terms  : {} ({} K)", terms.len(), terms.len() / 1000);
-    println!("dictionary      : {} (front-coded)", fmt_bytes(dict_fc as u64));
+    println!(
+        "distinct terms  : {} ({} K)",
+        terms.len(),
+        terms.len() / 1000
+    );
+    println!(
+        "dictionary      : {} (front-coded)",
+        fmt_bytes(dict_fc as u64)
+    );
 
     println!();
     println!("=== ZSTD BASELINE (what if we just stored the text) ===");
@@ -124,12 +141,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!("=== INDEX SIZE (whole library, no extrapolation) ===");
-    println!("{:>8} {:>12} {:>14} {:>10} {:>12} {:>10}",
-        "cap/doc", "positions", "index bytes", "index MB", "% of text", "% of epub");
+    println!(
+        "{:>8} {:>12} {:>14} {:>10} {:>12} {:>10}",
+        "cap/doc", "positions", "index bytes", "index MB", "% of text", "% of epub"
+    );
     for cap in [usize::MAX, 32usize, 8, 2] {
         let t0 = std::time::Instant::now();
         let r = measure_index(&corpus, &terms, cap);
-        let label = if cap == usize::MAX { "full".to_string() } else { cap.to_string() };
+        let label = if cap == usize::MAX {
+            "full".to_string()
+        } else {
+            cap.to_string()
+        };
         println!(
             "{:>8} {:>12} {:>14} {:>10.1} {:>11.1}% {:>9.1}%  {:.1}s",
             label,
@@ -367,7 +390,10 @@ fn index_book(postings: &mut HashMap<Vec<u8>, Postings>, doc: u32, text: &str) -
                 run.extend_from_slice(lower.encode_utf8(&mut [0u8; 4]).as_bytes());
             }
         } else if !run.is_empty() {
-            postings.entry(std::mem::take(&mut run)).or_default().push((doc, pos));
+            postings
+                .entry(std::mem::take(&mut run))
+                .or_default()
+                .push((doc, pos));
             pos += 1;
         }
     }

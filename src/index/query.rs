@@ -22,10 +22,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::index::{posting, Dict, EntryMap, Posting};
-use crate::storage::{postings_table, Engine, RunResult};
+use crate::index::{Dict, EntryMap, Posting, posting};
+use crate::storage::{Engine, RunResult, postings_table};
 use crate::tokenize;
-
 
 /// Terms a prefix query may expand to, and the document limit it may reach.
 pub const MAX_PREFIX_TERMS: usize = 64;
@@ -61,7 +60,12 @@ pub struct Hit {
 
 impl Hit {
     fn new(doc_id: u32, score: u32, first_position: u32, entry_idx: u16) -> Self {
-        Self { doc_id, score, first_position, entry_idx }
+        Self {
+            doc_id,
+            score,
+            first_position,
+            entry_idx,
+        }
     }
 }
 
@@ -128,41 +132,40 @@ pub fn expand(dict: &Dict, term: &[u8]) -> (Vec<Vec<u8>>, Status) {
 /// library, because the table has ~70 k rows and only the handful belonging to
 /// one term are wanted.
 pub fn term_postings(engine: &Engine, term: &[u8]) -> RunResult<Vec<Posting>> {
-    engine
-        .read(|txn| {
-            // No postings table yet means nothing was ever indexed, which is an
-            // empty result rather than an error.
-            let t = match crate::storage::or_empty(txn.open_table(postings_table()))? {
-                Some(t) => t,
-                None => return Ok(Vec::new()),
-            };
+    engine.read(|txn| {
+        // No postings table yet means nothing was ever indexed, which is an
+        // empty result rather than an error.
+        let t = match crate::storage::or_empty(txn.open_table(postings_table()))? {
+            Some(t) => t,
+            None => return Ok(Vec::new()),
+        };
 
-            // The key is `(term, chunk_idx)`; bounding both ends by the prefix
-            // makes redb seek straight to the first row and stop at the last.
-            let start = (term, u16::MIN);
-            let end = (term, u16::MAX);
+        // The key is `(term, chunk_idx)`; bounding both ends by the prefix
+        // makes redb seek straight to the first row and stop at the last.
+        let start = (term, u16::MIN);
+        let end = (term, u16::MAX);
 
-            let mut chunks: Vec<posting::Chunk> = Vec::new();
-            for row in t.range(start..=end)? {
-                let (_k, v) = row?;
-                // An unreadable chunk means that part of the list is missing;
-                // continuing with the rest is still useful, and reporting
-                // nothing would hide results that exist.
-                if let Some(c) = posting::Chunk::decode(v.value()) {
-                    chunks.push(c);
-                }
+        let mut chunks: Vec<posting::Chunk> = Vec::new();
+        for row in t.range(start..=end)? {
+            let (_k, v) = row?;
+            // An unreadable chunk means that part of the list is missing;
+            // continuing with the rest is still useful, and reporting
+            // nothing would hide results that exist.
+            if let Some(c) = posting::Chunk::decode(v.value()) {
+                chunks.push(c);
             }
+        }
 
-            // Sort on the stored lower bound, not the key: it is the field the
-            // chunk codec actually relies on, and it survives any key encoding.
-            chunks.sort_by_key(|c| c.first_doc);
+        // Sort on the stored lower bound, not the key: it is the field the
+        // chunk codec actually relies on, and it survives any key encoding.
+        chunks.sort_by_key(|c| c.first_doc);
 
-            let mut out = Vec::new();
-            for c in chunks {
-                out.extend(c.postings);
-            }
-            Ok(out)
-        })
+        let mut out = Vec::new();
+        for c in chunks {
+            out.extend(c.postings);
+        }
+        Ok(out)
+    })
 }
 
 /// Union of the postings of several terms.
@@ -211,7 +214,11 @@ pub fn search(
 ) -> RunResult<Result> {
     let terms = tokenize::tokenize(query);
     if terms.is_empty() {
-        return Ok(Result { status: Status::Empty, hits: Vec::new(), expanded: Vec::new() });
+        return Ok(Result {
+            status: Status::Empty,
+            hits: Vec::new(),
+            expanded: Vec::new(),
+        });
     }
 
     // Expand each query term, keeping the overall status the most severe one.
@@ -225,7 +232,11 @@ pub fn search(
         expanded.extend(e);
     }
     if status != Status::Ok || expanded.is_empty() {
-        return Ok(Result { status, hits: Vec::new(), expanded: Vec::new() });
+        return Ok(Result {
+            status,
+            hits: Vec::new(),
+            expanded: Vec::new(),
+        });
     }
 
     // Rarest term first, so the candidate set is as small as possible.
@@ -241,11 +252,18 @@ pub fn search(
         .collect();
     let hits = match scope {
         None => hits,
-        Some(ids) => hits.into_iter().filter(|h| ids.contains(&h.doc_id)).collect(),
+        Some(ids) => hits
+            .into_iter()
+            .filter(|h| ids.contains(&h.doc_id))
+            .collect(),
     };
 
     let _ = scoped(&hits, None);
-    Ok(Result { status, hits, expanded })
+    Ok(Result {
+        status,
+        hits,
+        expanded,
+    })
 }
 
 /// Runs a phrase query: every term present, in adjacent positions.
@@ -293,15 +311,14 @@ pub fn search_phrase(engine: &Engine, dict: &Dict, phrase: &str) -> RunResult<Ve
     for &i in &order[1..] {
         let mut next = HashMap::new();
         for (doc, positions) in &candidates {
-            let Some(other) = lists[i].get(doc) else { continue };
+            let Some(other) = lists[i].get(doc) else {
+                continue;
+            };
             // A phrase needs position + 1 in the next term, so keep only the
             // positions that chain.
             let mut chained: Vec<(u32, u16)> = Vec::new();
             for &(p, e) in positions {
-                if other
-                    .binary_search_by_key(&(p + 1), |&(q, _)| q)
-                    .is_ok()
-                {
+                if other.binary_search_by_key(&(p + 1), |&(q, _)| q).is_ok() {
                     chained.push((p, e));
                 }
             }
@@ -337,7 +354,10 @@ fn matches_for_positions(
         .into_iter()
         .map(|p| ((p.doc_id, p.position), p.entry_idx))
         .collect();
-    Ok(wanted.iter().map(|k| want.get(k).copied().unwrap_or(0)).collect())
+    Ok(wanted
+        .iter()
+        .map(|k| want.get(k).copied().unwrap_or(0))
+        .collect())
 }
 
 /// Locates a token inside a section's decoded text.
@@ -372,7 +392,10 @@ pub fn snippet(text: &str, byte_off: usize, radius: usize) -> String {
     let byte_off = byte_off.min(text.len());
     let start = floor(text, byte_off.saturating_sub(radius));
     let end = ceil(text, byte_off.saturating_add(radius));
-    text[start..end].split_whitespace().collect::<Vec<_>>().join(" ")
+    text[start..end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn floor(text: &str, i: usize) -> usize {
@@ -407,13 +430,15 @@ pub fn hit_snippet(
     let book_id = u16::try_from(doc_id).ok()?;
     let text = texts(doc_id, hit.entry_idx)?;
     let map: EntryMap = engine
-        .read(|txn| match txn.open_table(crate::storage::entrymap_table()) {
-            Ok(t) => match t.get((book_id, hit.entry_idx))? {
-                Some(v) => Ok(Some(EntryMap::decode(v.value())?)),
-                None => Ok(None),
+        .read(
+            |txn| match txn.open_table(crate::storage::entrymap_table()) {
+                Ok(t) => match t.get((book_id, hit.entry_idx))? {
+                    Some(v) => Ok(Some(EntryMap::decode(v.value())?)),
+                    None => Ok(None),
+                },
+                Err(_) => Ok(None),
             },
-            Err(_) => Ok(None),
-        })
+        )
         .ok()
         .flatten()?;
 
@@ -532,7 +557,12 @@ mod tests {
             let term = format!("t{i}");
             dict.insert(
                 term.as_bytes(),
-                dict::DictEntry { df: 1, tf: 1, chunk_count: 0, flags: 0 },
+                dict::DictEntry {
+                    df: 1,
+                    tf: 1,
+                    chunk_count: 0,
+                    flags: 0,
+                },
             );
         }
         let (terms, status) = expand(&dict, b"t");
@@ -548,7 +578,12 @@ mod tests {
             let term = format!("q{i}");
             dict.insert(
                 term.as_bytes(),
-                dict::DictEntry { df: MAX_PREFIX_DOCS, tf: 1, chunk_count: 0, flags: 0 },
+                dict::DictEntry {
+                    df: MAX_PREFIX_DOCS,
+                    tf: 1,
+                    chunk_count: 0,
+                    flags: 0,
+                },
             );
         }
         let (terms, status) = expand(&dict, b"q");
@@ -777,9 +812,13 @@ mod tests {
         let dict = index(&e, CORPUS);
         let hits = search_phrase(&e, &dict, "thám tử").unwrap();
         // No entry maps were written, so there is no snippet.
-        let out = hit_snippet(&e, hits[0].doc_id, &hits[0], &|_, _| {
-            Some("Thám tử lừng danh".to_string())
-        }, 30);
+        let out = hit_snippet(
+            &e,
+            hits[0].doc_id,
+            &hits[0],
+            &|_, _| Some("Thám tử lừng danh".to_string()),
+            30,
+        );
         assert!(out.is_none() || hits.is_empty());
     }
 
@@ -791,7 +830,9 @@ mod tests {
         // postings then "go backwards", and every phrase query against that
         // term silently loses its matches.
         let (_d, e) = engine();
-        let mut w = super::super::writer::Writer::new(&e).unwrap().with_max_pending(8);
+        let mut w = super::super::writer::Writer::new(&e)
+            .unwrap()
+            .with_max_pending(8);
 
         // Enough documents to need several hundred one-posting chunks.
         let docs = 600u32;
@@ -805,7 +846,10 @@ mod tests {
         w.close(&mut dict).unwrap();
 
         let chunks = chunk_rows(&e, b"zero");
-        assert!(chunks > 256, "the fixture must cross the key boundary: {chunks}");
+        assert!(
+            chunks > 256,
+            "the fixture must cross the key boundary: {chunks}"
+        );
 
         let postings = term_postings(&e, b"zero").unwrap();
         assert_eq!(postings.len() as u32, docs * 4);
@@ -816,8 +860,9 @@ mod tests {
             "doc ids must ascend across every chunk"
         );
         assert!(
-            postings.windows(2).all(|w| w[0].doc_id != w[1].doc_id
-                || w[0].position < w[1].position),
+            postings
+                .windows(2)
+                .all(|w| w[0].doc_id != w[1].doc_id || w[0].position < w[1].position),
             "positions must strictly ascend within a document"
         );
     }

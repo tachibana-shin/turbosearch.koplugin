@@ -50,10 +50,17 @@ pub fn decode_text(bytes: &[u8]) -> io::Result<Vec<u8>> {
 
 fn decode_utf16(bytes: &[u8], big_endian: bool) -> Vec<u8> {
     let units: Vec<u16> = if big_endian {
-        bytes[2..].as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect()
+        bytes[2..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect()
     } else {
         bytes[2..]
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect()
     };
@@ -76,7 +83,10 @@ mod tests {
 
     #[test]
     fn utf8_passes_through() {
-        assert_eq!(decode_text("Thám tử".as_bytes()).unwrap(), "Thám tử".as_bytes());
+        assert_eq!(
+            decode_text("Thám tử".as_bytes()).unwrap(),
+            "Thám tử".as_bytes()
+        );
     }
 
     #[test]

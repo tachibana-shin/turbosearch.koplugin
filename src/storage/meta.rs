@@ -115,11 +115,7 @@ impl Meta {
             book_id_limit: r.u32()?,
             scan_cursor: {
                 let s = r.str()?;
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s)
-                }
+                if s.is_empty() { None } else { Some(s) }
             },
             db_bytes_written: r.u64()?,
             status: Status::from_u8(r.u8()?).unwrap_or(Status::Idle),
@@ -156,7 +152,10 @@ mod tests {
         let bytes = m.encode();
         let back = Meta::decode(&bytes).unwrap();
         assert_eq!(back, m);
-        assert_eq!(back.scan_cursor.as_deref(), Some("documents/A Bá Tá [99].txt"));
+        assert_eq!(
+            back.scan_cursor.as_deref(),
+            Some("documents/A Bá Tá [99].txt")
+        );
     }
 
     #[test]
@@ -171,8 +170,16 @@ mod tests {
 
     #[test]
     fn all_statuses_roundtrip() {
-        for s in [Status::Idle, Status::Scanning, Status::Indexing, Status::BudgetExceeded] {
-            let m = Meta { status: s, ..Meta::new() };
+        for s in [
+            Status::Idle,
+            Status::Scanning,
+            Status::Indexing,
+            Status::BudgetExceeded,
+        ] {
+            let m = Meta {
+                status: s,
+                ..Meta::new()
+            };
             assert_eq!(Meta::decode(&m.encode()).unwrap().status, s);
         }
     }
@@ -214,7 +221,11 @@ mod tests {
     fn sizes_are_bounded() {
         let m = Meta::new();
         // Guard against accidental bloat: this row is read on every startup.
-        assert!(m.encode().len() < 64, "META row is {} bytes", m.encode().len());
+        assert!(
+            m.encode().len() < 64,
+            "META row is {} bytes",
+            m.encode().len()
+        );
     }
 
     #[test]

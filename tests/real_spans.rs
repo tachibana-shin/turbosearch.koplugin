@@ -2,10 +2,14 @@
 //! tests' synthetic inputs did not reproduce the failure.
 
 #[test]
+#[ignore = "needs a reference library: set TURBOSEARCH_LIBRARY"]
 fn real_book_slices_are_always_on_char_boundaries() {
-    let root = "/home/shin/.config/koreader/rakuyomi/downloads/calibre";
-    let Ok(entries) = std::fs::read_dir(root) else {
-        eprintln!("library not present; skipping");
+    let Some(root) = turbosearch::library::root() else {
+        eprintln!("reference library not set; skipping");
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        eprintln!("reference library unreadable; skipping");
         return;
     };
     let mut checked = 0;
@@ -41,5 +45,9 @@ fn real_book_slices_are_always_on_char_boundaries() {
     for f in failures.iter().take(5) {
         eprintln!("  {f:?}");
     }
-    assert!(failures.is_empty(), "{} span(s) are not usable", failures.len());
+    assert!(
+        failures.is_empty(),
+        "{} span(s) are not usable",
+        failures.len()
+    );
 }

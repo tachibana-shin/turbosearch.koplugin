@@ -95,11 +95,7 @@ fn is_word_char(ch: char) -> bool {
 ///
 /// The callback receives borrowed term bytes and their position, so indexing a
 /// whole book allocates nothing per token.
-pub fn for_each_token(
-    text: &str,
-    start_position: u32,
-    mut sink: impl FnMut(&[u8], u32),
-) -> u32 {
+pub fn for_each_token(text: &str, start_position: u32, mut sink: impl FnMut(&[u8], u32)) -> u32 {
     for_each_token_spanned(text, start_position, |term, position, _, _| {
         sink(term, position)
     })
@@ -356,7 +352,10 @@ mod tests {
 
     #[test]
     fn whitespace_inside_words_does_not_merge_them() {
-        assert_eq!(terms("thám\n\ttử  sher\tlock"), vec!["tham", "tu", "sher", "lock"]);
+        assert_eq!(
+            terms("thám\n\ttử  sher\tlock"),
+            vec!["tham", "tu", "sher", "lock"]
+        );
     }
 
     // --- Vietnamese ----------------------------------------------------------
@@ -390,7 +389,12 @@ mod tests {
         // "duoc" never finds "được".
         assert_eq!(
             terms("được đọc đấy ĐƯỢC"),
-            vec!["duoc".to_string(), "doc".to_string(), "day".to_string(), "duoc".to_string()]
+            vec![
+                "duoc".to_string(),
+                "doc".to_string(),
+                "day".to_string(),
+                "duoc".to_string()
+            ]
         );
         assert_eq!(terms("được"), terms("duoc"));
     }
@@ -407,7 +411,11 @@ mod tests {
         // which matches what a user typing "1/2" would produce.
         assert_eq!(terms("½"), vec!["1".to_string(), "2".to_string()]);
         assert_eq!(terms("²"), vec!["2".to_string()]);
-        assert_eq!(terms("Ａｂ"), vec!["ab".to_string()], "fullwidth latin folds");
+        assert_eq!(
+            terms("Ａｂ"),
+            vec!["ab".to_string()],
+            "fullwidth latin folds"
+        );
     }
 
     // --- splitting -----------------------------------------------------------
@@ -436,20 +444,34 @@ mod tests {
         );
         assert_eq!(
             terms("Tap 3 - Chuong 17"),
-            vec!["tap".to_string(), "3".to_string(), "chuong".to_string(), "17".to_string()]
+            vec![
+                "tap".to_string(),
+                "3".to_string(),
+                "chuong".to_string(),
+                "17".to_string()
+            ]
         );
     }
 
     #[test]
     fn digits_and_letters_split_into_their_own_terms() {
-        assert_eq!(terms("Chapter12"), vec!["chapter".to_string(), "12".to_string()]);
+        assert_eq!(
+            terms("Chapter12"),
+            vec!["chapter".to_string(), "12".to_string()]
+        );
         assert_eq!(terms("3D"), vec!["3".to_string(), "d".to_string()]);
     }
 
     #[test]
     fn emoji_and_symbols_are_separators() {
-        assert_eq!(terms("hello 📚 world"), vec!["hello".to_string(), "world".to_string()]);
-        assert_eq!(terms("a+b=c"), vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            terms("hello 📚 world"),
+            vec!["hello".to_string(), "world".to_string()]
+        );
+        assert_eq!(
+            terms("a+b=c"),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
     }
 
     // --- CJK -----------------------------------------------------------------
@@ -501,7 +523,10 @@ mod tests {
     #[test]
     fn hangul_is_treated_as_spaced_words_not_cjk() {
         // Korean spaces its words, so a Hangul run must not split into unigrams.
-        assert_eq!(terms("한국어 텍스트"), vec!["한국어".to_string(), "텍스트".to_string()]);
+        assert_eq!(
+            terms("한국어 텍스트"),
+            vec!["한국어".to_string(), "텍스트".to_string()]
+        );
     }
 
     #[test]
@@ -617,7 +642,10 @@ mod preview_tests {
         assert_eq!(lookup.get("tiec"), Some(&"Tiệc"));
         assert_eq!(lookup.get("sherlockian"), Some(&"Sherlockian"));
         // Capitalisation is preserved too.
-        assert_eq!(lookup.get("sherlockian").map(|s| s.as_bytes()[0]), Some(b'S'));
+        assert_eq!(
+            lookup.get("sherlockian").map(|s| s.as_bytes()[0]),
+            Some(b'S')
+        );
     }
 
     #[test]
@@ -646,9 +674,15 @@ mod preview_tests {
         // The snippet is the book's own words, not the folded index key: the
         // diacritics and the capital letters are all still there.
         assert!(snippet.contains('ế'), "diacritics must survive");
-        assert!(snippet.contains('Ụ') || snippet.contains('Y'), "capitalisation must survive");
+        assert!(
+            snippet.contains('Ụ') || snippet.contains('Y'),
+            "capitalisation must survive"
+        );
         assert!(snippet.contains('S'), "capitalisation must survive");
-        assert!(!snippet.contains("yen tiec"), "the folded key must not be shown");
+        assert!(
+            !snippet.contains("yen tiec"),
+            "the folded key must not be shown"
+        );
     }
 
     #[test]
@@ -656,7 +690,10 @@ mod preview_tests {
         let text = "中文テスト";
         let mut spans: Vec<(String, String)> = Vec::new();
         for_each_token_spanned(text, 0, |term, _, start, end| {
-            spans.push((String::from_utf8_lossy(term).into_owned(), text[start..end].to_string()));
+            spans.push((
+                String::from_utf8_lossy(term).into_owned(),
+                text[start..end].to_string(),
+            ));
         });
         let lookup: std::collections::HashMap<&str, &str> = spans
             .iter()
@@ -699,7 +736,10 @@ mod preview_tests {
         let got: Vec<(String, String)> = {
             let mut v = Vec::new();
             for_each_token_spanned(text, 0, |t, _, s, e| {
-                v.push((String::from_utf8_lossy(t).into_owned(), text[s..e].to_string()))
+                v.push((
+                    String::from_utf8_lossy(t).into_owned(),
+                    text[s..e].to_string(),
+                ))
             });
             v
         };
@@ -720,13 +760,19 @@ mod preview_tests {
         let got: Vec<(String, String)> = {
             let mut v = Vec::new();
             for_each_token_spanned(text, 0, |t, _, s, e| {
-                v.push((String::from_utf8_lossy(t).into_owned(), text[s..e].to_string()))
+                v.push((
+                    String::from_utf8_lossy(t).into_owned(),
+                    text[s..e].to_string(),
+                ))
             });
             v
         };
         assert_eq!(
             got,
-            vec![("alpha".to_string(), "alpha".to_string()), ("beta".to_string(), "beta".to_string())]
+            vec![
+                ("alpha".to_string(), "alpha".to_string()),
+                ("beta".to_string(), "beta".to_string())
+            ]
         );
     }
 
@@ -898,7 +944,10 @@ mod vietnamese_tests {
         // and "ar". That is invisible on a Vietnamese library, and the fix is the
         // same one the tone problem needs: index the exact form alongside the
         // folded form. Until then this is a known trade-off, not a subtle bug.
-        assert_eq!(terms("år vet vi"), vec!["ar".to_string(), "vet".to_string(), "vi".to_string()]);
+        assert_eq!(
+            terms("år vet vi"),
+            vec!["ar".to_string(), "vet".to_string(), "vi".to_string()]
+        );
     }
 
     fn terms(text: &str) -> Vec<String> {

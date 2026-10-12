@@ -12,7 +12,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = Path::new(&arg);
     let fmt = turbosearch::format::detect(path);
     println!("file       : {}", path.display());
-    println!("extension  : {:?}", path.extension().and_then(|e| e.to_str()));
+    println!(
+        "extension  : {:?}",
+        path.extension().and_then(|e| e.to_str())
+    );
     println!("detected   : {fmt:?}");
 
     let t0 = std::time::Instant::now();
@@ -22,13 +25,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("title      : {}", content.metadata.title);
     println!("authors    : {:?}", content.metadata.authors);
     println!("language   : {}", content.metadata.language);
-    println!("series     : {} #{}", content.metadata.series, content.metadata.series_index);
+    println!(
+        "series     : {} #{}",
+        content.metadata.series, content.metadata.series_index
+    );
     println!("identifiers: {}", content.metadata.identifiers.join(", "));
 
     let text: usize = content.sections.iter().map(|s| s.text.len()).sum();
     println!("text bytes : {text} ({:.1} KB)", text as f64 / 1024.0);
     let preview = String::from_utf8_lossy(&content.sections[0].text);
-    let start = preview.char_indices().nth(120).map(|(i, _)| i).unwrap_or(preview.len());
+    let start = preview
+        .char_indices()
+        .nth(120)
+        .map(|(i, _)| i)
+        .unwrap_or(preview.len());
     println!("preview    : {:?}", &preview[..start.min(preview.len())]);
     Ok(())
 }

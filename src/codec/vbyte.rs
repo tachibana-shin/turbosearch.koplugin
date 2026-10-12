@@ -20,9 +20,9 @@ pub fn read_leb128(bytes: &[u8], pos: &mut usize) -> io::Result<u32> {
     let mut result: u32 = 0;
     let mut shift = 0u32;
     loop {
-        let byte = *bytes.get(*pos).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "truncated LEB128")
-        })?;
+        let byte = *bytes
+            .get(*pos)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "truncated LEB128"))?;
         *pos += 1;
 
         if shift >= 32 {

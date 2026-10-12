@@ -14,14 +14,14 @@ pub mod metadata;
 pub mod pack;
 
 pub use book::{
-    path_in_scope, scan_full, scan_scope, scan_with_mode, Book, Coverage, FileFilter, Format,
-    ScanMode, ScanPlan, ScopeFilter,
+    Book, Coverage, FileFilter, Format, ScanMode, ScanPlan, ScopeFilter, path_in_scope, scan_full,
+    scan_scope, scan_with_mode,
 };
 pub use config::{Config, IndexDepth, PrefixMode};
 pub use meta::{Meta, Status};
 pub use metadata::{
-    rebuild_index as rebuild_meta_index, search as search_metadata, BookMetaRecord, MetaIndex,
-    Provenance, METAIDX_KEY,
+    BookMetaRecord, METAIDX_KEY, MetaIndex, Provenance, rebuild_index as rebuild_meta_index,
+    search as search_metadata,
 };
 
 pub use pack::{Reader, Writer as PackWriter};
@@ -149,7 +149,8 @@ impl Engine {
     pub fn write_meta(&self, meta: &Meta) -> RunResult<()> {
         let bytes = meta.encode();
         self.write(|txn| {
-            txn.open_table(meta_table())?.insert(Meta::KEY, bytes.as_slice())?;
+            txn.open_table(meta_table())?
+                .insert(Meta::KEY, bytes.as_slice())?;
             Ok(())
         })
     }
@@ -161,8 +162,10 @@ impl Engine {
         let bytes = b.encode();
         let path = b.path.clone();
         self.write(|txn| {
-            txn.open_table(book::books_table())?.insert(id, bytes.as_slice())?;
-            txn.open_table(book::paths_table())?.insert(path.as_str(), id)?;
+            txn.open_table(book::books_table())?
+                .insert(id, bytes.as_slice())?;
+            txn.open_table(book::paths_table())?
+                .insert(path.as_str(), id)?;
             Ok(())
         })
     }
@@ -236,7 +239,6 @@ impl Engine {
         std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
     }
 }
-
 
 /// The `META` table: exactly one row, keyed by [`Meta::KEY`].
 pub fn meta_table() -> redb::TableDefinition<'static, &'static str, &'static [u8]> {

@@ -22,11 +22,14 @@ use turbosearch::codec::{elias_fano, front, pfor, vbyte};
 type Postings = Vec<(u32, u32)>;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = PathBuf::from(
-        std::env::args()
-            .nth(1)
-            .unwrap_or_else(|| "/home/shin/.config/koreader/rakuyomi/downloads/calibre".to_string()),
-    );
+    let root = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| {
+        // The reference library, resolved through `library` so the path is
+        // found on any machine that has one, rather than one developer's.
+        turbosearch::library::root()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .to_string_lossy()
+            .into_owned()
+    }));
     let book_limit: usize = std::env::args()
         .nth(2)
         .and_then(|s| s.parse().ok())
@@ -35,7 +38,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(3)
         .map(|s| {
             s.split(',')
-                .filter_map(|x| if x == "inf" { Some(usize::MAX) } else { x.parse().ok() })
+                .filter_map(|x| {
+                    if x == "inf" {
+                        Some(usize::MAX)
+                    } else {
+                        x.parse().ok()
+                    }
+                })
                 .collect()
         })
         .unwrap_or_else(|| vec![2, 8, 32, usize::MAX]);
@@ -63,7 +72,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let terms: Vec<&[u8]> = {
-        let map: BTreeMap<&[u8], ()> = postings.keys().map(|k| k.as_slice()).map(|k| (k, ())).collect();
+        let map: BTreeMap<&[u8], ()> = postings
+            .keys()
+            .map(|k| k.as_slice())
+            .map(|k| (k, ()))
+            .collect();
         map.into_keys().collect()
     };
 
@@ -71,14 +84,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== CORPUS ===");
     println!("books indexed : {books}");
     println!("tokens        : {tokens}");
-    println!("distinct terms: {} ({:.1}K)", terms.len(), terms.len() as f64 / 1e3);
+    println!(
+        "distinct terms: {} ({:.1}K)",
+        terms.len(),
+        terms.len() as f64 / 1e3
+    );
 
     // Term dictionary size under front coding.
     let refs: Vec<&[u8]> = terms.clone();
     let dict_fc = front::encode(&refs).len();
     let dict_raw: usize = terms.iter().map(|t| t.len() + 2).sum();
-    println!("dictionary    : front-coded {} bytes ({:.1}% of raw {})",
-        dict_fc, 100.0 * dict_fc as f64 / dict_raw as f64, dict_raw);
+    println!(
+        "dictionary    : front-coded {} bytes ({:.1}% of raw {})",
+        dict_fc,
+        100.0 * dict_fc as f64 / dict_raw as f64,
+        dict_raw
+    );
 
     // Size sweep over the two levers.
     println!();
@@ -90,21 +111,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(4)
         .map(|s| {
             s.split(',')
-                .filter_map(|x| if x == "inf" { Some(usize::MAX) } else { x.parse().ok() })
+                .filter_map(|x| {
+                    if x == "inf" {
+                        Some(usize::MAX)
+                    } else {
+                        x.parse().ok()
+                    }
+                })
                 .collect()
         })
         .unwrap_or_else(|| vec![usize::MAX]);
 
     println!();
     println!("=== SIZE SWEEP (projected to the 2.5GB / 600M-token reference library) ===");
-    println!("{:>8} {:>9} {:>12} {:>8} {:>11} {:>13}", "cap/doc", "df-limit", "postings", "kept", "bits/post", "projected DB");
+    println!(
+        "{:>8} {:>9} {:>12} {:>8} {:>11} {:>13}",
+        "cap/doc", "df-limit", "postings", "kept", "bits/post", "projected DB"
+    );
     for &cap in &caps {
         for &df_limit in &df_limits {
             let r = measure(&postings, &terms, cap, df_limit, full_postings);
             println!(
                 "{:>8} {:>9} {:>12} {:>7.1}% {:>11.2} {:>11} MB",
-                if cap == usize::MAX { "inf".to_string() } else { cap.to_string() },
-                if df_limit == usize::MAX { "inf".to_string() } else { df_limit.to_string() },
+                if cap == usize::MAX {
+                    "inf".to_string()
+                } else {
+                    cap.to_string()
+                },
+                if df_limit == usize::MAX {
+                    "inf".to_string()
+                } else {
+                    df_limit.to_string()
+                },
                 r.postings,
                 100.0 * r.postings as f64 / full_postings as f64,
                 r.bits_per_posting,
@@ -367,7 +405,10 @@ fn index_book(postings: &mut HashMap<Vec<u8>, Postings>, doc: u32, text: &str) {
                 run.extend_from_slice(lower.encode_utf8(&mut [0u8; 4]).as_bytes());
             }
         } else if !run.is_empty() {
-            postings.entry(std::mem::take(&mut run)).or_default().push((doc, pos));
+            postings
+                .entry(std::mem::take(&mut run))
+                .or_default()
+                .push((doc, pos));
             pos += 1;
         }
     }

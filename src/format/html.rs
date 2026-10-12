@@ -8,7 +8,7 @@
 //! their contents cannot leak into the token stream. Everything that survives is
 //! plain text, ready for the tokenizer.
 
-use lol_html::{element, rewrite_str, RewriteStrSettings};
+use lol_html::{RewriteStrSettings, element, rewrite_str};
 use std::io;
 
 /// Extracts the text of an HTML or XHTML document.
@@ -219,7 +219,10 @@ fn is_entity_char(b: u8) -> bool {
 /// Resolves `&name;` or `&#nnn;` to its UTF-8 bytes.
 fn resolve_entity(entity: &[u8]) -> Option<Vec<u8>> {
     let body = &entity[1..entity.len() - 1];
-    if let Some(hex) = body.strip_prefix(b"#x").or_else(|| body.strip_prefix(b"#X")) {
+    if let Some(hex) = body
+        .strip_prefix(b"#x")
+        .or_else(|| body.strip_prefix(b"#X"))
+    {
         let code = u32::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
         return char::from_u32(code).map(|c| c.to_string().into_bytes());
     }
@@ -357,5 +360,4 @@ mod tests {
         assert_eq!(decode_entities(b"&amp&amp;").0, b"&amp&");
         assert_eq!(decode_entities(b"&amp; &amp;").0, b"& &");
     }
-
 }

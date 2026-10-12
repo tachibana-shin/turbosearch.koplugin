@@ -65,7 +65,11 @@ pub struct Posting {
 
 impl Posting {
     pub fn new(doc_id: u32, position: u32, entry_idx: u16) -> Self {
-        Self { doc_id, position, entry_idx }
+        Self {
+            doc_id,
+            position,
+            entry_idx,
+        }
     }
 }
 
@@ -107,7 +111,11 @@ impl Chunk {
                 // non-decreasing within a document, so RLE still collapses it to
                 // one value per section.
                 entries.push(p.entry_idx as u32);
-                pos_gaps.push(if k == i { p.position } else { p.position - prev });
+                pos_gaps.push(if k == i {
+                    p.position
+                } else {
+                    p.position - prev
+                });
                 prev = p.position;
             }
             i = j;
@@ -256,7 +264,10 @@ impl Chunk {
             }
         }
 
-        Some(Self { first_doc, postings })
+        Some(Self {
+            first_doc,
+            postings,
+        })
     }
 
     /// True when the chunk may contain `doc`.
@@ -361,7 +372,10 @@ mod tests {
             first_doc: 7,
             postings: vec![posting(7, 120, 3)],
         };
-        assert_eq!(Chunk::decode(&chunk.encode()).unwrap().postings, chunk.postings);
+        assert_eq!(
+            Chunk::decode(&chunk.encode()).unwrap().postings,
+            chunk.postings
+        );
     }
 
     #[test]
@@ -375,7 +389,11 @@ mod tests {
         // Comparing the whole vector would dump 500 lines on failure; a count
         // plus a checksum says the same thing.
         assert_eq!(back.postings.len(), postings.len());
-        assert_eq!(checksum(&back.postings), checksum(&postings), "positions drifted");
+        assert_eq!(
+            checksum(&back.postings),
+            checksum(&postings),
+            "positions drifted"
+        );
         assert_eq!(back.postings.last().map(|p| p.position), Some(499 * 37));
     }
 
@@ -390,7 +408,11 @@ mod tests {
         };
         let back = Chunk::decode(&chunk.encode()).unwrap();
         assert_eq!(back.postings.len(), chunk.postings.len());
-        assert_eq!(checksum(&back.postings), checksum(&chunk.postings), "positions drifted");
+        assert_eq!(
+            checksum(&back.postings),
+            checksum(&chunk.postings),
+            "positions drifted"
+        );
     }
 
     #[test]
@@ -437,7 +459,10 @@ mod tests {
         };
         let mut bytes = chunk.encode();
         bytes[0] ^= 0xFF;
-        assert!(Chunk::decode(&bytes).is_none(), "a foreign tag must not parse");
+        assert!(
+            Chunk::decode(&bytes).is_none(),
+            "a foreign tag must not parse"
+        );
     }
 
     #[test]
@@ -448,7 +473,10 @@ mod tests {
         };
         let bytes = chunk.encode();
         for cut in 0..bytes.len() {
-            assert!(Chunk::decode(&bytes[..cut]).is_none() || cut >= 20, "cut {cut}");
+            assert!(
+                Chunk::decode(&bytes[..cut]).is_none() || cut >= 20,
+                "cut {cut}"
+            );
         }
     }
 
@@ -468,7 +496,10 @@ mod tests {
         };
         assert!(chunk.may_contain(100));
         assert!(chunk.may_contain(103));
-        assert!(chunk.may_contain(200), "a later chunk is needed to rule it out");
+        assert!(
+            chunk.may_contain(200),
+            "a later chunk is needed to rule it out"
+        );
         assert!(!chunk.may_contain(99));
     }
 
@@ -526,7 +557,11 @@ mod tests {
         // A checksum rather than the whole vector: 24k postings of Rust Debug
         // output would bury the actual difference.
         assert_eq!(rebuilt.len(), postings.len());
-        assert_eq!(checksum(&rebuilt), checksum(&postings), "the round trip drifted");
+        assert_eq!(
+            checksum(&rebuilt),
+            checksum(&postings),
+            "the round trip drifted"
+        );
     }
 
     #[test]
@@ -565,7 +600,10 @@ mod tests {
             postings: vec![Posting::new(7, 0, 0), Posting::new(7, 4, 0)],
         };
         let bytes = chunk.encode();
-        assert_eq!(bytes[4], ENCODING_RAW, "a tiny chunk must not be compressed");
+        assert_eq!(
+            bytes[4], ENCODING_RAW,
+            "a tiny chunk must not be compressed"
+        );
         assert_eq!(Chunk::decode(&bytes), Some(chunk));
     }
 
@@ -576,7 +614,10 @@ mod tests {
         let postings: Vec<Posting> = (0..CHUNK_POSTINGS as u32)
             .map(|i| Posting::new(1000 + i / 8, i, (i % 20) as u16))
             .collect();
-        let chunk = Chunk { first_doc: 1000, postings };
+        let chunk = Chunk {
+            first_doc: 1000,
+            postings,
+        };
         let bytes = chunk.encode();
         assert_eq!(bytes[4], ENCODING_ZSTD, "a full chunk must be compressed");
         let decoded = Chunk::decode(&bytes).expect("decode");
@@ -594,7 +635,10 @@ mod tests {
             // column assumes.
             .map(|i| Posting::new(500 + i / 3, i, (i / 800) as u16))
             .collect();
-        let chunk = Chunk { first_doc: 500, postings };
+        let chunk = Chunk {
+            first_doc: 500,
+            postings,
+        };
         let encoded = chunk.encode();
         // The columns alone, without the container framing.
         let columns = columns_only(&chunk);

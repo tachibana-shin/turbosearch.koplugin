@@ -11,10 +11,17 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let phrase = std::env::args().nth(1).unwrap_or_else(|| "thám tử".to_string());
-    let root = std::env::args()
-        .nth(2)
-        .unwrap_or_else(|| "/home/shin/.config/koreader/rakuyomi/downloads/calibre".to_string());
+    let phrase = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "thám tử".to_string());
+    let root = std::env::args().nth(2).unwrap_or_else(|| {
+        // The reference library, resolved through `library` so the path is
+        // found on any machine that has one, rather than one developer's.
+        turbosearch::library::root()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .to_string_lossy()
+            .into_owned()
+    });
 
     let mut files = Vec::new();
     walk(Path::new(&root), &mut files);
@@ -23,7 +30,9 @@ fn main() {
 
     // Tokenize the query the same way the documents are tokenized.
     let mut qterms: Vec<String> = Vec::new();
-    turbosearch::tokenize::for_each_token(&phrase, 0, |t, _| qterms.push(String::from_utf8_lossy(t).into_owned()));
+    turbosearch::tokenize::for_each_token(&phrase, 0, |t, _| {
+        qterms.push(String::from_utf8_lossy(t).into_owned())
+    });
     println!("query terms: {qterms:?}");
     if qterms.is_empty() {
         println!("(no terms; nothing to search)");
@@ -101,7 +110,10 @@ fn main() {
                 found.len(),
                 path.file_name().unwrap().to_string_lossy()
             );
-            println!("      preview: {:?}", preview(&content, section_index, from, to));
+            println!(
+                "      preview: {:?}",
+                preview(&content, section_index, from, to)
+            );
         }
     }
     println!("books matching: {hits}");
@@ -143,4 +155,3 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         }
     }
 }
-

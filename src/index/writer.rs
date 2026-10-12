@@ -16,8 +16,8 @@
 
 use std::collections::BTreeMap;
 
-use crate::index::{dict, posting, Chunk, EntryMap, Posting};
-use crate::storage::{entrymap_table, postings_table, Engine, RunResult};
+use crate::index::{Chunk, EntryMap, Posting, dict, posting};
+use crate::storage::{Engine, RunResult, entrymap_table, postings_table};
 use redb::ReadableTable;
 
 /// Positions kept per `(term, document)` before the term is flagged partial.
@@ -205,9 +205,8 @@ impl<'a> Writer<'a> {
         self.pending_postings -= postings.len();
 
         let mut next = self.next_chunk.get(term).copied().unwrap_or(0);
-        let mut writes: Vec<(u16, Vec<u8>)> = Vec::with_capacity(
-            postings.len() / posting::CHUNK_POSTINGS + 1,
-        );
+        let mut writes: Vec<(u16, Vec<u8>)> =
+            Vec::with_capacity(postings.len() / posting::CHUNK_POSTINGS + 1);
 
         for group in postings.chunks(posting::CHUNK_POSTINGS) {
             if group.is_empty() {
@@ -257,7 +256,9 @@ impl<'a> Writer<'a> {
         // A term that hit the per-document cap loses positions, so it must be
         // reported as partial or the query layer will trust an incomplete list.
         for (term, c) in &self.counts {
-            if c.dropped > 0 && let Some(e) = dict.entry_for_mut(term) {
+            if c.dropped > 0
+                && let Some(e) = dict.entry_for_mut(term)
+            {
                 e.flags |= dict::FLAG_PARTIAL;
             }
         }
@@ -285,7 +286,12 @@ impl<'a> Writer<'a> {
 }
 
 /// Writes one `ENTRYMAP` row.
-pub fn put_entry_map(engine: &Engine, book_id: u16, entry_idx: u16, map: &EntryMap) -> RunResult<()> {
+pub fn put_entry_map(
+    engine: &Engine,
+    book_id: u16,
+    entry_idx: u16,
+    map: &EntryMap,
+) -> RunResult<()> {
     let blob = map.encode();
     engine.write(|txn| {
         let mut t = txn.open_table(entrymap_table())?;
@@ -574,7 +580,15 @@ mod tests {
         {
             let e = Engine::open(&path).unwrap();
             let mut d = dict::Dict::new();
-            d.insert(b"persisted", dict::DictEntry { df: 3, tf: 12, chunk_count: 1, flags: 0 });
+            d.insert(
+                b"persisted",
+                dict::DictEntry {
+                    df: 3,
+                    tf: 12,
+                    chunk_count: 1,
+                    flags: 0,
+                },
+            );
             dict::store(&e, &d).unwrap();
         }
         let e = Engine::open(&path).unwrap();
@@ -638,7 +652,10 @@ mod tests {
     #[test]
     fn entry_maps_roundtrip_through_the_engine() {
         let (_d, e) = engine();
-        let m = EntryMap { name: "ch3".into(), checkpoints: vec![(0, 0), (2048, 900)] };
+        let m = EntryMap {
+            name: "ch3".into(),
+            checkpoints: vec![(0, 0), (2048, 900)],
+        };
         put_entry_map(&e, 7, 2, &m).unwrap();
         assert_eq!(get_entry_map(&e, 7, 2).unwrap().unwrap().name, "ch3");
     }
@@ -652,7 +669,10 @@ mod tests {
     #[test]
     fn removing_a_book_drops_its_entry_maps() {
         let (_d, e) = engine();
-        let m = EntryMap { name: "a".into(), checkpoints: vec![(0, 0)] };
+        let m = EntryMap {
+            name: "a".into(),
+            checkpoints: vec![(0, 0)],
+        };
         put_entry_map(&e, 3, 0, &m).unwrap();
         put_entry_map(&e, 3, 1, &m).unwrap();
         put_entry_map(&e, 4, 0, &m).unwrap();
@@ -660,7 +680,10 @@ mod tests {
 
         assert!(get_entry_map(&e, 3, 0).unwrap().is_none());
         assert!(get_entry_map(&e, 3, 1).unwrap().is_none());
-        assert!(get_entry_map(&e, 4, 0).unwrap().is_some(), "another book must survive");
+        assert!(
+            get_entry_map(&e, 4, 0).unwrap().is_some(),
+            "another book must survive"
+        );
     }
 
     #[test]

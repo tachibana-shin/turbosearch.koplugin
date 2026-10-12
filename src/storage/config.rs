@@ -11,8 +11,8 @@ use super::{Engine, RunResult};
 
 /// Extensions that are scanned by default, `note.md` section 3.5.1.
 pub const DEFAULT_INCLUDE: &[&str] = &[
-    "epub", "kepub", "mobi", "azw", "azw3", "txt", "text", "md", "markdown", "fb2",
-    "fb2.zip", "html", "htm", "xhtml", "xht", "shtml",
+    "epub", "kepub", "mobi", "azw", "azw3", "txt", "text", "md", "markdown", "fb2", "fb2.zip",
+    "html", "htm", "xhtml", "xht", "shtml",
 ];
 
 /// Extensions that are never scanned, `note.md` section 3.5.1.
@@ -21,17 +21,18 @@ pub const DEFAULT_INCLUDE: &[&str] = &[
 /// partial downloads) plus formats we deliberately do not index.
 pub const DEFAULT_EXCLUDE: &[&str] = &[
     // Junk that turns up next to real books.
-    "log", "lua", "json", "opf", "ncx", "css", "js", "db", "db3", "sqlite3", "bak",
-    "tmp", "temp", "part", "partial", "old", "orig", "swp", "sdr", "toc", "cover",
+    "log", "lua", "json", "opf", "ncx", "css", "js", "db", "db3", "sqlite3", "bak", "tmp", "temp",
+    "part", "partial", "old", "orig", "swp", "sdr", "toc", "cover",
     // Images, fonts, archives.
-    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg", "mp3", "mp4", "mkv",
-    "woff", "woff2", "ttf", "zip", "gz", "tgz", "bz2", "xz", "7z", "rar", "tar", "zst",
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg", "mp3", "mp4", "mkv", "woff", "woff2",
+    "ttf", "zip", "gz", "tgz", "bz2", "xz", "7z", "rar", "tar", "zst",
     // Deliberately unindexed formats.
     "pdf", "djvu", "djv", "cbz", "cbr", "cb7", "cbt", "azw4", "azw6", "azw8", "kfx", "tpz",
 ];
 
 /// Directory globs skipped wholesale, `note.md` section 3.5.2.
-pub const DEFAULT_EXCLUDE_DIRS: &[&str] = &["*.sdr", ".calibrece", ".thumbnails", "@eaDir", "__MACOSX"];
+pub const DEFAULT_EXCLUDE_DIRS: &[&str] =
+    &["*.sdr", ".calibrece", ".thumbnails", "@eaDir", "__MACOSX"];
 
 /// Default minimum file size: below this a "book" is a fragment or a stray note.
 pub const DEFAULT_MIN_FILE_SIZE: u64 = 5 * 1024;

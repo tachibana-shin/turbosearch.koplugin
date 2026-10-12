@@ -8,4 +8,4 @@ pub mod writer;
 
 pub use dict::{Dict, DictEntry};
 pub use entrymap::{Builder as EntryMapBuilder, CHECKPOINT_INTERVAL, EntryMap};
-pub use posting::{into_chunks, Chunk, Posting, CHUNK_POSTINGS, CODEC_TAG};
+pub use posting::{CHUNK_POSTINGS, CODEC_TAG, Chunk, Posting, into_chunks};

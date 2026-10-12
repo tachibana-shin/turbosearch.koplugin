@@ -34,7 +34,10 @@ pub fn encode(strings: &[&[u8]]) -> Vec<u8> {
 
 pub fn decode(bytes: &[u8]) -> io::Result<Vec<Vec<u8>>> {
     if bytes.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "empty front-coded block"));
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "empty front-coded block",
+        ));
     }
     let mut pos = 0usize;
     let count = vbyte::read_leb128(bytes, &mut pos)? as usize;
@@ -45,7 +48,10 @@ pub fn decode(bytes: &[u8]) -> io::Result<Vec<Vec<u8>>> {
         if i == 0 {
             let len = vbyte::read_leb128(bytes, &mut pos)? as usize;
             let end = pos.checked_add(len).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "front-coded length overruns block")
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "front-coded length overruns block",
+                )
             })?;
             let s = bytes.get(pos..end).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::UnexpectedEof, "truncated first term")
@@ -63,11 +69,14 @@ pub fn decode(bytes: &[u8]) -> io::Result<Vec<Vec<u8>>> {
                 ));
             }
             let end = pos.checked_add(suffix_len).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "front-coded length overruns block")
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "front-coded length overruns block",
+                )
             })?;
-            let suffix = bytes.get(pos..end).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::UnexpectedEof, "truncated suffix")
-            })?;
+            let suffix = bytes
+                .get(pos..end)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "truncated suffix"))?;
             prev.truncate(shared);
             prev.extend_from_slice(suffix);
             out.push(prev.clone());
@@ -113,7 +122,12 @@ mod tests {
         let terms: Vec<&[u8]> = vec![b"sherlock", b"sherlockian", b"sherlockiana", b"sherries"];
         let bytes = encode(&terms);
         let raw: usize = terms.iter().map(|t| t.len() + 1).sum();
-        assert!(bytes.len() < raw, "front coding {} bytes vs raw {}", bytes.len(), raw);
+        assert!(
+            bytes.len() < raw,
+            "front coding {} bytes vs raw {}",
+            bytes.len(),
+            raw
+        );
         roundtrip(&terms);
     }
 
@@ -155,7 +169,10 @@ mod tests {
             "thư".as_bytes(),
             "thư_viện".as_bytes(),
         ];
-        assert!(terms.windows(2).all(|w| w[0] < w[1]), "fixture must stay sorted");
+        assert!(
+            terms.windows(2).all(|w| w[0] < w[1]),
+            "fixture must stay sorted"
+        );
         roundtrip(&terms);
     }
 

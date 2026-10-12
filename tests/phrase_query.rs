@@ -25,15 +25,15 @@ const SAMPLE_BOOKS: usize = 120;
 
 /// The queries under test, and what each one is there to check.
 const QUERIES: &[&str] = &[
-    "thám tử",           // accented, the way the book writes it
-    "Thám tử",           // different capitalisation
-    "THÁM TỬ",           // all caps
-    "tham tu",           // no diacritics at all
-    "Thám-tử",           // a different separator
-    "tử thám",           // reversed order
-    "thám",              // one term
-    "thám tử lừng danh", // three terms
-    "sherlock holmes",   // an English phrase
+    "thám tử",            // accented, the way the book writes it
+    "Thám tử",            // different capitalisation
+    "THÁM TỬ",            // all caps
+    "tham tu",            // no diacritics at all
+    "Thám-tử",            // a different separator
+    "tử thám",            // reversed order
+    "thám",               // one term
+    "thám tử lừng danh",  // three terms
+    "sherlock holmes",    // an English phrase
     "thám tử zhūmíng de", // nonsense that must match nothing
 ];
 
@@ -50,11 +50,7 @@ struct Outcome {
 /// version of this test that collected them into owned strings took four
 /// minutes over 120 books where this one takes a few seconds.
 fn measure() -> Option<Outcome> {
-    let home = std::env::var("HOME").ok()?;
-    let root = PathBuf::from(home).join(".config/koreader/rakuyomi/downloads/calibre");
-    if !root.is_dir() {
-        return None;
-    }
+    let root = turbosearch::library::root()?;
     let mut files = Vec::new();
     walk(&root, &mut files);
     files.sort();
@@ -65,7 +61,10 @@ fn measure() -> Option<Outcome> {
     let queries: Vec<Vec<String>> = QUERIES.iter().map(|q| query_terms(q)).collect();
     let mut out = Outcome {
         counts: QUERIES.iter().map(|q| (q.to_string(), 0)).collect(),
-        previews: QUERIES.iter().map(|q| (q.to_string(), Vec::new())).collect(),
+        previews: QUERIES
+            .iter()
+            .map(|q| (q.to_string(), Vec::new()))
+            .collect(),
         books_scanned: 0,
     };
 
@@ -95,11 +94,12 @@ fn measure() -> Option<Outcome> {
             for m in matchers.iter_mut() {
                 m.enter_section(section_index);
             }
-            position = tokenize::for_each_token_spanned(section, position, |term, _, start, end| {
-                for m in matchers.iter_mut() {
-                    m.push(term, start, end);
-                }
-            });
+            position =
+                tokenize::for_each_token_spanned(section, position, |term, _, start, end| {
+                    for m in matchers.iter_mut() {
+                        m.push(term, start, end);
+                    }
+                });
         }
 
         for (index, query) in QUERIES.iter().enumerate() {
@@ -195,7 +195,6 @@ impl PhraseMatcher {
             self.matched = usize::from(term == first);
         }
     }
-
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -257,6 +256,7 @@ fn preview(sections: &[String], section_index: usize, from: usize, to: usize) ->
 }
 
 #[test]
+#[ignore = "needs a reference library: set TURBOSEARCH_LIBRARY"]
 fn phrase_query_matches_across_diacritics_case_and_order() {
     let Some(out) = measure() else {
         eprintln!("library not present; skipping");
@@ -290,7 +290,10 @@ fn phrase_query_matches_across_diacritics_case_and_order() {
 
     // 4. Word order matters, and produces a different, smaller set.
     assert!(count("tử thám") < count("thám tử"), "order matters");
-    assert!(count("tử thám") > 0, "the reversal is a phrase in its own right");
+    assert!(
+        count("tử thám") > 0,
+        "the reversal is a phrase in its own right"
+    );
 
     // 5. A longer phrase is a subset of a shorter one.
     assert!(count("thám tử lừng danh") > 0);
@@ -325,7 +328,10 @@ fn phrase_query_matches_across_diacritics_case_and_order() {
 
     // 9. Previews show the original text, never the folded index key.
     for p in out.previews.get("thám tử").unwrap() {
-        assert!(!p.contains("tham tu"), "the folded key must never be shown: {p}");
+        assert!(
+            !p.contains("tham tu"),
+            "the folded key must never be shown: {p}"
+        );
         assert!(p.is_char_boundary(p.len()));
         assert!(!p.is_empty());
     }
@@ -367,8 +373,14 @@ fn the_streaming_matcher_agrees_with_the_simple_intersection() {
         // The streaming matcher restarts after a hit rather than resynchronising,
         // so it can undercount overlapping matches like "a a" in "a a a".
         assert!(
-            m.hits <= brute(&tokens.iter().map(|s| s.as_str()).collect::<Vec<_>>(), &terms.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
-            "streaming {} cannot exceed brute force for {:?}", m.hits, query
+            m.hits
+                <= brute(
+                    &tokens.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    &terms.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+                ),
+            "streaming {} cannot exceed brute force for {:?}",
+            m.hits,
+            query
         );
     }
 }

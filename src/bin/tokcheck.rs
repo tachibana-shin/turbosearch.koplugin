@@ -28,7 +28,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if term.is_empty()
                 || term.iter().any(|b| *b <= b' ')
                 || term.iter().any(|&b| b.is_ascii_uppercase())
-                || String::from_utf8_lossy(term).chars().any(|c| c.is_whitespace())
+                || String::from_utf8_lossy(term)
+                    .chars()
+                    .any(|c| c.is_whitespace())
             {
                 bad += 1;
             }
@@ -48,7 +50,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The real test: search with a folded, unaccented query and build a
     // preview from what the book actually says.
-    let query = std::env::args().nth(2).unwrap_or_else(|| "nguyen".to_string());
+    let query = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "nguyen".to_string());
     let wanted = turbosearch::tokenize::normalize(&query);
     println!();
     println!("query       : {query:?} -> index key {wanted:?}");

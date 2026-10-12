@@ -249,7 +249,11 @@ impl MetaIndex {
             let book_id = r.u16()?;
             let offset = r.u32()?;
             let len = r.u16()?;
-            entries.push(MetaIndexEntry { book_id, offset, len });
+            entries.push(MetaIndexEntry {
+                book_id,
+                offset,
+                len,
+            });
         }
         let compressed = r.bytes()?;
         // A corrupt blob is not fatal: the query path then simply finds nothing.
@@ -414,7 +418,10 @@ mod tests {
     use super::*;
 
     fn record() -> BookMetaRecord {
-        let mut r = BookMetaRecord::new("Yến Tiệc Của Sherlockian Và Bão Tố Mùa Xuân", "Mai Mochizuki\nNinh Nhân Văn (dịch)");
+        let mut r = BookMetaRecord::new(
+            "Yến Tiệc Của Sherlockian Và Bão Tố Mùa Xuân",
+            "Mai Mochizuki\nNinh Nhân Văn (dịch)",
+        );
         r.language = "vi".to_string();
         r.series = "Holmes ở Kyoto".to_string();
         r.series_index = 5000;
@@ -433,7 +440,10 @@ mod tests {
 
     #[test]
     fn authors_split_on_newline() {
-        assert_eq!(record().author_list(), vec!["Mai Mochizuki", "Ninh Nhân Văn (dịch)"]);
+        assert_eq!(
+            record().author_list(),
+            vec!["Mai Mochizuki", "Ninh Nhân Văn (dịch)"]
+        );
     }
 
     #[test]
@@ -444,7 +454,11 @@ mod tests {
 
     #[test]
     fn provenance_roundtrips_all_variants() {
-        for p in [Provenance::Filename, Provenance::Embedded, Provenance::Sidecar] {
+        for p in [
+            Provenance::Filename,
+            Provenance::Embedded,
+            Provenance::Sidecar,
+        ] {
             let mut r = record();
             r.provenance = p;
             let back = BookMetaRecord::decode(&r.encode()).unwrap();
@@ -515,8 +529,14 @@ mod tests {
     fn an_empty_query_matches_nothing() {
         let mut index = MetaIndex::new();
         index.push(1, "anything");
-        assert!(index.search("").is_empty(), "an empty query matches nothing");
-        assert!(index.search("   ").is_empty(), "neither does a whitespace query");
+        assert!(
+            index.search("").is_empty(),
+            "an empty query matches nothing"
+        );
+        assert!(
+            index.search("   ").is_empty(),
+            "neither does a whitespace query"
+        );
     }
 
     #[test]
@@ -549,7 +569,10 @@ mod tests {
     fn compression_actually_shrinks_the_blob() {
         let mut index = MetaIndex::new();
         for i in 0..200u16 {
-            index.push(i, &format!("A fairly repetitive title number {i} by the same author"));
+            index.push(
+                i,
+                &format!("A fairly repetitive title number {i} by the same author"),
+            );
         }
         let encoded = index.encode();
         assert!(

@@ -33,8 +33,14 @@ impl BitWriter {
     ///
     /// `n` must be at most [`MAX_BITS_PER_WRITE`], and `value` must fit in `n` bits.
     pub fn write_bits(&mut self, value: u64, n: u32) {
-        debug_assert!(n <= MAX_BITS_PER_WRITE, "n={n} exceeds {MAX_BITS_PER_WRITE}");
-        debug_assert!(n == 64 || value < (1u64 << n), "value {value} does not fit in {n} bits");
+        debug_assert!(
+            n <= MAX_BITS_PER_WRITE,
+            "n={n} exceeds {MAX_BITS_PER_WRITE}"
+        );
+        debug_assert!(
+            n == 64 || value < (1u64 << n),
+            "value {value} does not fit in {n} bits"
+        );
 
         if n == 0 {
             return;
@@ -106,7 +112,11 @@ impl<'a> BitReader<'a> {
             let bit_off = self.bit_pos & 7;
             let available = 8 - bit_off as u32;
             let take = available.min(n - filled);
-            let mask = if take == 64 { u64::MAX } else { (1u64 << take) - 1 };
+            let mask = if take == 64 {
+                u64::MAX
+            } else {
+                (1u64 << take) - 1
+            };
             result |= ((byte >> bit_off) & mask) << filled;
             filled += take;
             self.bit_pos += take as usize;
@@ -146,11 +156,7 @@ impl<'a> BitReader<'a> {
 /// Smallest number of bits that can represent `v` (0 for `v == 0`).
 #[inline]
 pub fn bits_for(v: u64) -> u32 {
-    if v == 0 {
-        0
-    } else {
-        64 - v.leading_zeros()
-    }
+    if v == 0 { 0 } else { 64 - v.leading_zeros() }
 }
 
 #[cfg(test)]
@@ -219,7 +225,16 @@ mod tests {
 
     #[test]
     fn bits_for_matches_log2() {
-        for &(v, b) in &[(0u64, 0u32), (1, 1), (2, 2), (3, 2), (4, 3), (7, 3), (255, 8), (256, 9)] {
+        for &(v, b) in &[
+            (0u64, 0u32),
+            (1, 1),
+            (2, 2),
+            (3, 2),
+            (4, 3),
+            (7, 3),
+            (255, 8),
+            (256, 9),
+        ] {
             assert_eq!(bits_for(v), b, "v={v}");
         }
         assert_eq!(bits_for(u32::MAX as u64), 32);

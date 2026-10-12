@@ -177,7 +177,10 @@ impl<'a> Reader<'a> {
     pub fn bytes_ref(&mut self) -> Result<&'a [u8]> {
         let len = self.u32()? as usize;
         let end = self.pos.checked_add(len).ok_or(PackError::LengthOverrun)?;
-        let slice = self.buf.get(self.pos..end).ok_or(PackError::LengthOverrun)?;
+        let slice = self
+            .buf
+            .get(self.pos..end)
+            .ok_or(PackError::LengthOverrun)?;
         self.pos = end;
         Ok(slice)
     }
@@ -217,7 +220,10 @@ impl<'a> Reader<'a> {
 
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         let end = self.pos.checked_add(n).ok_or(PackError::UnexpectedEof)?;
-        let slice = self.buf.get(self.pos..end).ok_or(PackError::UnexpectedEof)?;
+        let slice = self
+            .buf
+            .get(self.pos..end)
+            .ok_or(PackError::UnexpectedEof)?;
         self.pos = end;
         Ok(slice)
     }
@@ -254,7 +260,16 @@ mod tests {
 
     #[test]
     fn integers_roundtrip_at_bounds() {
-        for v in [0u64, 1, 255, 256, u16::MAX as u64, u32::MAX as u64, u64::MAX, i64::MIN as u64] {
+        for v in [
+            0u64,
+            1,
+            255,
+            256,
+            u16::MAX as u64,
+            u32::MAX as u64,
+            u64::MAX,
+            i64::MIN as u64,
+        ] {
             let bytes = Writer::new().u64(v).finish();
             assert_eq!(Reader::new(&bytes).u64().unwrap(), v);
         }

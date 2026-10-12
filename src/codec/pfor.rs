@@ -5,7 +5,7 @@
 //! most values of a column share a similar magnitude, which is exactly the shape
 //! of the position-gap column inside a single document.
 
-use super::bits::{bits_for, BitReader, BitWriter};
+use super::bits::{BitReader, BitWriter, bits_for};
 use super::vbyte;
 use std::io;
 
@@ -25,7 +25,12 @@ pub fn encode_auto(values: &[u32]) -> Vec<u8> {
     }
 
     let pfor = encode_pfor(values);
-    let vbyte_len = 1 + 5 + values.iter().map(|v| vbyte::leb_len(*v) as usize).sum::<usize>();
+    let vbyte_len = 1
+        + 5
+        + values
+            .iter()
+            .map(|v| vbyte::leb_len(*v) as usize)
+            .sum::<usize>();
 
     if vbyte_len <= pfor.len() {
         let mut out = Vec::with_capacity(vbyte_len);
@@ -50,11 +55,17 @@ fn encode_pfor(values: &[u32]) -> Vec<u8> {
     let best_b = (0..=bits_max)
         .rev()
         .filter(|&b| {
-            let exc = values.iter().filter(|&&v| b < 32 && v >= (1u32 << b)).count();
+            let exc = values
+                .iter()
+                .filter(|&&v| b < 32 && v >= (1u32 << b))
+                .count();
             exc * MAX_EXCEPTION_RATIO <= n
         })
         .min_by_key(|&b| {
-            let exceptions = values.iter().filter(|&&v| b < 32 && v >= (1u32 << b)).count();
+            let exceptions = values
+                .iter()
+                .filter(|&&v| b < 32 && v >= (1u32 << b))
+                .count();
             // Cost model: packed area + spill area, in bytes.
             (n * b as usize).div_ceil(8) + exceptions * 6 + 8
         });
@@ -94,7 +105,10 @@ fn encode_pfor(values: &[u32]) -> Vec<u8> {
 
 pub fn decode(bytes: &[u8]) -> io::Result<Vec<u32>> {
     if bytes.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "empty PForDelta block"));
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "empty PForDelta block",
+        ));
     }
     let tag = bytes[0];
     let mut pos = 1usize;
@@ -106,9 +120,10 @@ pub fn decode(bytes: &[u8]) -> io::Result<Vec<u32>> {
         }
         TAG_PFOR => {
             let n = vbyte::read_leb128(bytes, &mut pos)? as usize;
-            let b = *bytes.get(pos).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::UnexpectedEof, "missing bit width")
-            })? as u32;
+            let b = *bytes
+                .get(pos)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "missing bit width"))?
+                as u32;
             pos += 1;
             let exc_count = vbyte::read_leb128(bytes, &mut pos)? as usize;
 

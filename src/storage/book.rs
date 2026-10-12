@@ -468,7 +468,12 @@ pub fn scan_scope(
     filter: &FileFilter,
     dir: impl AsRef<Path>,
 ) -> RunResult<ScanPlan> {
-    scan_with_mode(engine, filter, &[dir.as_ref().to_path_buf()], ScanMode::Scope)
+    scan_with_mode(
+        engine,
+        filter,
+        &[dir.as_ref().to_path_buf()],
+        ScanMode::Scope,
+    )
 }
 
 /// Sweeps every configured source directory.
@@ -498,22 +503,24 @@ fn walk_root(
                 continue;
             }
             walk_root(&path, filter, visit)?;
-        } else if file_type.is_file() && filter.accepts(&path)
-            && let Some((size, mtime, ino)) = stat_triple(&path) {
-                let format = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(Format::from_extension)
-                    .unwrap_or(Format::Unknown);
-                visit(FileEntry {
-                    path,
-                    scope: None,
-                    size,
-                    mtime_ms: mtime,
-                    inode: ino,
-                    format,
-                })?;
-            }
+        } else if file_type.is_file()
+            && filter.accepts(&path)
+            && let Some((size, mtime, ino)) = stat_triple(&path)
+        {
+            let format = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(Format::from_extension)
+                .unwrap_or(Format::Unknown);
+            visit(FileEntry {
+                path,
+                scope: None,
+                size,
+                mtime_ms: mtime,
+                inode: ino,
+                format,
+            })?;
+        }
     }
     Ok(())
 }

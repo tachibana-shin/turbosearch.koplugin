@@ -78,13 +78,18 @@ pub fn detect_bytes(head: &[u8]) -> Format {
     }
 
     let text = leading_text(head);
-    if text.starts_with("<?xml") {
+    // Case-insensitive, not a list of spellings: HTML, XML and their
+    // declarations are all case-insensitive by spec, and real files use
+    // `<?XML`, `<!DOCTYPE HTML`, `<HtMl>`. A lowercase-only check silently
+    // sends an FB2 whose declaration is `<?XML` down the markup path instead,
+    // which is a real bug this test suite has caught once.
+    if starts_with_ci(text.as_bytes(), b"<?xml") {
         return detect_xml(text);
     }
-    if text.starts_with("<!DOCTYPE html") || text.starts_with("<!doctype html") {
+    if starts_with_ci(text.as_bytes(), b"<!doctype html") {
         return Format::Html;
     }
-    if text.starts_with("<html") || text.starts_with("<HTML") {
+    if starts_with_ci(text.as_bytes(), b"<html") {
         return Format::Html;
     }
     if text.starts_with('<') {
@@ -97,6 +102,14 @@ pub fn detect_bytes(head: &[u8]) -> Format {
     Format::Unknown
 }
 
+/// True when `bytes` starts with `prefix`, ignoring ASCII case.
+fn starts_with_ci(bytes: &[u8], prefix: &[u8]) -> bool {
+    bytes.len() >= prefix.len()
+        && bytes[..prefix.len()]
+            .iter()
+            .zip(prefix)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
 /// EPUB's ZIP stores `mimetype` as the first, uncompressed entry, so the
 /// signature is visible without parsing the archive. Not every writer honours
 /// that, so the fallback opens the central directory, which lists every entry

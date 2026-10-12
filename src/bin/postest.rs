@@ -14,11 +14,7 @@ use std::path::{Path, PathBuf};
 use turbosearch::codec::{elias_fano, pfor};
 
 fn main() {
-    let dir = PathBuf::from(
-        std::env::args()
-            .nth(1)
-            .unwrap_or_else(|| ".".to_string()),
-    );
+    let dir = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| ".".to_string()));
     let limit: usize = std::env::args()
         .nth(2)
         .and_then(|s| s.parse().ok())
@@ -44,7 +40,10 @@ fn main() {
         for section in &content.sections {
             let text = String::from_utf8_lossy(&section.text);
             position = turbosearch::tokenize::for_each_token(&text, position, |term, pos| {
-                postings.entry(term.to_vec()).or_default().push((doc as u32, pos));
+                postings
+                    .entry(term.to_vec())
+                    .or_default()
+                    .push((doc as u32, pos));
             });
         }
     }
@@ -125,11 +124,7 @@ fn phrase_hits(
 }
 
 fn coarsen(pos: u32, bits: u32) -> u32 {
-    if bits == 0 {
-        pos
-    } else {
-        pos >> bits
-    }
+    if bits == 0 { pos } else { pos >> bits }
 }
 
 /// Encodes every term's postings, slicing into blocks of 128 like the real

@@ -81,10 +81,14 @@ pub fn parse(bytes: &[u8]) -> io::Result<Mobi> {
     let mut compression = COMPRESSION_PALMDOC;
     let mut text_length = 0usize;
 
-    if let Some(record0) = records.first().and_then(|r| bytes.get(r.offset..r.offset + r.len)) {
+    if let Some(record0) = records
+        .first()
+        .and_then(|r| bytes.get(r.offset..r.offset + r.len))
+    {
         if record0.len() >= 16 {
             compression = u16::from_be_bytes([record0[0], record0[1]]);
-            text_length = u32::from_be_bytes([record0[4], record0[5], record0[6], record0[7]]) as usize;
+            text_length =
+                u32::from_be_bytes([record0[4], record0[5], record0[6], record0[7]]) as usize;
         }
         if let Some(exth) = find(record0, b"EXTH") {
             parse_exth(exth, &mut metadata);
@@ -124,10 +128,18 @@ fn parse_records(bytes: &[u8], record_count: usize) -> io::Result<Vec<Record>> {
     for i in 0..record_count {
         let base = PDB_HEADER_LEN + i * PDB_RECORD_INFO_SIZE;
         let offset = u32::from_be_bytes([
-            *bytes.get(base).ok_or_else(|| invalid("missing record offset"))?,
-            *bytes.get(base + 1).ok_or_else(|| invalid("missing record offset"))?,
-            *bytes.get(base + 2).ok_or_else(|| invalid("missing record offset"))?,
-            *bytes.get(base + 3).ok_or_else(|| invalid("missing record offset"))?,
+            *bytes
+                .get(base)
+                .ok_or_else(|| invalid("missing record offset"))?,
+            *bytes
+                .get(base + 1)
+                .ok_or_else(|| invalid("missing record offset"))?,
+            *bytes
+                .get(base + 2)
+                .ok_or_else(|| invalid("missing record offset"))?,
+            *bytes
+                .get(base + 3)
+                .ok_or_else(|| invalid("missing record offset"))?,
         ]) as usize;
 
         let next = if i + 1 < record_count {

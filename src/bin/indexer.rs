@@ -18,20 +18,30 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use turbosearch::format::{epub, mobi, plain, sniff};
-use turbosearch::index::{dict, entrymap, query, writer, EntryMap};
-use turbosearch::storage::book::{scan_scope, Format};
-use turbosearch::storage::{book::FileEntry, config::Config, Engine, RunError};
-use turbosearch::tokenize::{self, for_each_token_spanned};
 use redb::ReadableTable;
+use turbosearch::format::{epub, mobi, plain, sniff};
+use turbosearch::index::{EntryMap, dict, entrymap, query, writer};
+use turbosearch::storage::book::{Format, scan_scope};
+use turbosearch::storage::{Engine, RunError, book::FileEntry, config::Config};
+use turbosearch::tokenize::{self, for_each_token_spanned};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let root = PathBuf::from(args.next().unwrap_or_else(|| ".".into()));
-    let db = PathBuf::from(
-        args.next()
-            .unwrap_or_else(|| "/tmp/opencode/turbosearch.idx".into()),
-    );
+    let root = PathBuf::from(args.next().unwrap_or_else(|| {
+        turbosearch::library::root()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .to_string_lossy()
+            .into_owned()
+    }));
+    let db = PathBuf::from(args.next().unwrap_or_else(|| {
+        // A scratch database under the process temp directory: a hardcoded
+        // path would resolve on the machine that developed this and nowhere
+        // else.
+        turbosearch::library::scratch_dir()
+            .join("turbosearch.idx")
+            .to_string_lossy()
+            .into_owned()
+    }));
     let max_books: Option<usize> = std::env::var("MAX_BOOKS").ok().and_then(|v| v.parse().ok());
     let want_search = std::env::var("SEARCH").ok();
 
@@ -133,14 +143,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let index = turbosearch::storage::metadata::rebuild_index(&engine)?;
     engine.put_meta_index(&index)?;
-    println!("metadata rows: {meta_rows}, index {} bytes", index.blob_len());
+    println!(
+        "metadata rows: {meta_rows}, index {} bytes",
+        index.blob_len()
+    );
     // Compact once the writer is gone, so the file does not carry every page the
     // session churned through. A fresh index that skips this measured 69% free
     // space, which is three times the data it holds.
     let reclaimed = engine.compact()?;
     let size_after_compact = engine.file_size();
 
-    println!("indexed {indexed} books ({sections_total} sections), skipped {skipped}, failed {failed}");
+    println!(
+        "indexed {indexed} books ({sections_total} sections), skipped {skipped}, failed {failed}"
+    );
     let formats = counts
         .iter()
         .map(|(f, n)| format!("{f}={n}"))
@@ -156,7 +171,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("db {db:?} = {} bytes ({:.1} MB)", size, size as f64 / 1e6);
     if text_bytes > 0 {
-        println!("index size / text size = {:.1}%", size as f64 * 100.0 / text_bytes as f64);
+        println!(
+            "index size / text size = {:.1}%",
+            size as f64 * 100.0 / text_bytes as f64
+        );
     }
 
     // Diagnostics, all through one handle: redb files are single-writer, so a
@@ -195,7 +213,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let t = Instant::now();
         let hits = query::search_phrase(&diag, &dict, &q)?;
-        println!("\nphrase {q:?} -> {} hits in {:.1?}", hits.len(), t.elapsed());
+        println!(
+            "\nphrase {q:?} -> {} hits in {:.1?}",
+            hits.len(),
+            t.elapsed()
+        );
         show(&diag, &hits);
 
         let t = Instant::now();
@@ -233,9 +255,9 @@ fn show(engine: &Engine, hits: &[query::Hit]) {
 fn all_entry_names(engine: &Engine) -> Vec<(u16, u16, EntryMap)> {
     engine
         .read(|txn| {
-            let t = match turbosearch::storage::or_empty(txn.open_table(
-                turbosearch::storage::entrymap_table(),
-            ))? {
+            let t = match turbosearch::storage::or_empty(
+                txn.open_table(turbosearch::storage::entrymap_table()),
+            )? {
                 Some(t) => t,
                 None => return Ok(Vec::new()),
             };
@@ -260,7 +282,9 @@ fn hit_snippets(
         if *book != hit.doc_id as u16 {
             continue;
         }
-        let Some(text) = load_section_text(map) else { continue };
+        let Some(text) = load_section_text(map) else {
+            continue;
+        };
         let (pos, byte_off) = map.checkpoint_for(hit.first_position);
         if let Some(off) = query::locate(&text, pos, byte_off, hit.first_position) {
             out.push((map.name.clone(), query::snippet(&text, off, 120)));
@@ -318,8 +342,12 @@ fn plan(root: &Path, max: Option<usize>) -> Vec<FileEntry> {
 /// A throwaway engine, because `scan_scope` diffs against `BOOKS` and an empty
 /// database makes every candidate come back as new.
 fn tempdir_engine() -> Engine {
-    let dir = std::path::Path::new("/tmp/opencode");
-    let _ = std::fs::create_dir_all(dir);
+    let dir = turbosearch::library::scratch_dir();
+    // Created here rather than assumed: the same path is used to write the
+    // database, so it has to exist wherever the process's temp directory is.
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        panic!("create {}: {e}", dir.display());
+    }
     let path = dir.join("turbosearch.scan.redb");
     let _ = std::fs::remove_file(&path);
     Engine::open(path).expect("open scratch engine")
@@ -342,7 +370,9 @@ fn load_sections(path: &Path, format: Format) -> Result<Vec<Vec<u8>>, RunError> 
         }
         Format::Mobi | Format::Azw | Format::Azw3 => {
             let bytes = std::fs::read(path).map_err(|e| bad(&e.to_string()))?;
-            Ok(vec![mobi::parse(&bytes).map_err(|e| bad(&e.to_string()))?.text])
+            Ok(vec![
+                mobi::parse(&bytes).map_err(|e| bad(&e.to_string()))?.text,
+            ])
         }
         _ => Err(bad("unsupported text format")),
     }

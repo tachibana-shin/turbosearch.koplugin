@@ -166,11 +166,7 @@ fn append_text(out: &mut Vec<u8>, t: &quick_xml::events::BytesText) {
 ///
 /// A section title leads the body text so the words are in reading order, which
 /// is what the position counter depends on.
-fn flush_section(
-    text: &mut Vec<u8>,
-    title: &mut Vec<u8>,
-    sections: &mut Vec<Section>,
-) {
+fn flush_section(text: &mut Vec<u8>, title: &mut Vec<u8>, sections: &mut Vec<Section>) {
     if text.is_empty() && title.is_empty() {
         return;
     }
@@ -201,8 +197,13 @@ fn local_name(full: &[u8]) -> String {
 fn attr(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<String> {
     e.attributes().flatten().find_map(|a| {
         let k = a.key.as_ref();
-        let base = k.iter().rposition(|&b| b == b':').map(|i| i + 1).unwrap_or(0);
-        (k[base..].eq_ignore_ascii_case(key)).then(|| String::from_utf8_lossy(&a.value).into_owned())
+        let base = k
+            .iter()
+            .rposition(|&b| b == b':')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        (k[base..].eq_ignore_ascii_case(key))
+            .then(|| String::from_utf8_lossy(&a.value).into_owned())
     })
 }
 
@@ -256,14 +257,23 @@ mod tests {
     #[test]
     fn annotation_becomes_the_description() {
         let c = open(SAMPLE.as_bytes()).unwrap();
-        assert!(c.metadata.description.contains("tuổi thơ"), "{}", c.metadata.description);
+        assert!(
+            c.metadata.description.contains("tuổi thơ"),
+            "{}",
+            c.metadata.description
+        );
     }
 
     #[test]
     fn each_section_is_a_section() {
         let c = open(SAMPLE.as_bytes()).unwrap();
         assert_eq!(c.sections.len(), 2);
-        let all: String = c.sections.iter().map(|s| String::from_utf8_lossy(&s.text).into_owned()).collect::<Vec<_>>().join("\n");
+        let all: String = c
+            .sections
+            .iter()
+            .map(|s| String::from_utf8_lossy(&s.text).into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(all.contains("Thám tử Sherlock"), "{all}");
         assert!(all.contains("ghế"), "{all}");
     }
@@ -283,8 +293,14 @@ mod tests {
         let result = open(b"<FictionBook><body><section><p>partial text");
         let parsed = result.expect("a truncated document is not a hard failure");
         assert!(
-            String::from_utf8_lossy(&parsed.sections.first().map(|s| s.text.clone()).unwrap_or_default())
-                .contains("partial text"),
+            String::from_utf8_lossy(
+                &parsed
+                    .sections
+                    .first()
+                    .map(|s| s.text.clone())
+                    .unwrap_or_default()
+            )
+            .contains("partial text"),
             "the text that did parse should survive"
         );
     }
@@ -292,7 +308,13 @@ mod tests {
     #[test]
     fn genuinely_broken_xml_does_not_panic() {
         // Garbage in must not panic, whichever way it comes out.
-        for src in [&b""[..], b"<", b"<<<>>>", b"\x00\x01\x02", "<FictionBook>\u{FFFD}".as_bytes()] {
+        for src in [
+            &b""[..],
+            b"<",
+            b"<<<>>>",
+            b"\x00\x01\x02",
+            "<FictionBook>\u{FFFD}".as_bytes(),
+        ] {
             let _ = open(src);
         }
     }

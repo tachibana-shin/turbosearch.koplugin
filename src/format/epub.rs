@@ -85,7 +85,8 @@ pub fn container_rootfile(container_xml: &[u8]) -> Option<String> {
         match reader.read_event_into(&mut buf) {
             Err(_) => return None,
             Ok(quick_xml::events::Event::Eof) => return None,
-            Ok(quick_xml::events::Event::Empty(ref e)) | Ok(quick_xml::events::Event::Start(ref e)) => {
+            Ok(quick_xml::events::Event::Empty(ref e))
+            | Ok(quick_xml::events::Event::Start(ref e)) => {
                 let name = e.name();
                 if local_name(name.as_ref()) != "rootfile" {
                     buf.clear();
@@ -123,7 +124,8 @@ pub fn parse_package(opf: &[u8]) -> Package {
             // `<item rdf:.../>` and `<itemref .../>` are self-closing, so they
             // arrive as Empty. Handling only Start here silently drops the
             // entire spine.
-            Ok(quick_xml::events::Event::Start(ref e)) | Ok(quick_xml::events::Event::Empty(ref e)) => {
+            Ok(quick_xml::events::Event::Start(ref e))
+            | Ok(quick_xml::events::Event::Empty(ref e)) => {
                 let name = local_name(e.name().as_ref());
                 match name.as_str() {
                     "metadata" => in_metadata = true,
@@ -227,7 +229,10 @@ fn apply_meta_tag(meta: &mut BookMeta, e: &quick_xml::events::BytesStart) {
 /// Accepts `1`, `1.0`, `1.5` and a leading `#3` form; 0 means "unknown".
 fn parse_series_index(s: &str) -> u32 {
     let trimmed = s.trim().trim_start_matches('#').trim();
-    trimmed.parse::<f32>().map(|v| (v * 1000.0).round() as u32).unwrap_or(0)
+    trimmed
+        .parse::<f32>()
+        .map(|v| (v * 1000.0).round() as u32)
+        .unwrap_or(0)
 }
 
 /// Reads the character data of an element, consuming through to its end.
@@ -245,7 +250,11 @@ fn read_text(reader: &mut quick_xml::Reader<&[u8]>, name: quick_xml::name::QName
 /// require a particular case, and books in the wild take advantage of that, so a
 /// case-sensitive comparison here would silently drop the spine or the metadata.
 fn local_name(full: &[u8]) -> String {
-    let base = full.iter().rposition(|&b| b == b':').map(|i| i + 1).unwrap_or(0);
+    let base = full
+        .iter()
+        .rposition(|&b| b == b':')
+        .map(|i| i + 1)
+        .unwrap_or(0);
     String::from_utf8_lossy(&full[base..]).to_ascii_lowercase()
 }
 
@@ -256,7 +265,11 @@ fn attr_value(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<String> {
         .flatten()
         .find(|a| {
             let k = a.key.as_ref();
-            let base = k.iter().rposition(|&b| b == b':').map(|i| i + 1).unwrap_or(0);
+            let base = k
+                .iter()
+                .rposition(|&b| b == b':')
+                .map(|i| i + 1)
+                .unwrap_or(0);
             k[base..].eq_ignore_ascii_case(key)
         })
         .map(|a| String::from_utf8_lossy(&a.value).into_owned())
@@ -304,18 +317,18 @@ fn percent_decode(s: &str) -> String {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
             let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
             if let Some(hex) = hex
-                && let Ok(v) = u8::from_str_radix(hex, 16) {
-                    out.push(v);
-                    i += 3;
-                    continue;
-                }
+                && let Ok(v) = u8::from_str_radix(hex, 16)
+            {
+                out.push(v);
+                i += 3;
+                continue;
+            }
         }
         out.push(bytes[i]);
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
 }
-
 
 /// Why an EPUB could not be opened.
 #[derive(Debug, thiserror::Error)]
@@ -350,12 +363,14 @@ const MAX_SECTIONS: usize = 2000;
 /// (`note.md` section 3.2, step 1).
 pub fn open(path: &std::path::Path) -> Result<BookContent, OpenError> {
     let file = std::fs::File::open(path)?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| OpenError::NotArchive(e.to_string()))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| OpenError::NotArchive(e.to_string()))?;
 
     // Locate the OPF.
     let opf_path = match read_entry(&mut archive, "META-INF/container.xml") {
-        Some(container) => container_rootfile(&container).unwrap_or_else(|| guess_opf(&mut archive)),
+        Some(container) => {
+            container_rootfile(&container).unwrap_or_else(|| guess_opf(&mut archive))
+        }
         None => guess_opf(&mut archive),
     };
     if opf_path.is_empty() {
@@ -497,9 +512,10 @@ fn guess_opf<R: std::io::Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>)
     }
     for i in 0..archive.len() {
         if let Ok(entry) = archive.by_index(i)
-            && entry.name().ends_with(".opf") {
-                return entry.name().to_string();
-            }
+            && entry.name().ends_with(".opf")
+        {
+            return entry.name().to_string();
+        }
     }
     String::new()
 }
@@ -560,10 +576,16 @@ mod tests {
 
     #[test]
     fn opens_the_measured_library_epub_and_reads_its_spine() {
-        // A real book from the reference library, if it is present.
-        let root = "/home/shin/.config/koreader/rakuyomi/downloads/calibre";
+        // A real book from the reference library, if it is present. The path
+        // comes from `library`, never a hardcoded one, so this runs on any
+        // machine that has a KOReader library and skips (with a message) on one
+        // that does not.
+        let Some(root) = crate::library::root() else {
+            eprintln!("reference library not set; skipping");
+            return;
+        };
         let Ok(entries) = std::fs::read_dir(root) else {
-            eprintln!("library not present; skipping");
+            eprintln!("reference library unreadable; skipping");
             return;
         };
         let Some(path) = entries.flatten().find_map(|e| {
@@ -576,10 +598,16 @@ mod tests {
 
         let content = open(&path).expect("open a real epub");
         assert!(!content.sections.is_empty(), "a real book yields sections");
-        assert!(!content.metadata.title.is_empty(), "a real book has a title");
+        assert!(
+            !content.metadata.title.is_empty(),
+            "a real book has a title"
+        );
         // Position 0 must be real prose, not markup.
         let first = std::str::from_utf8(&content.sections[0].text).unwrap();
-        assert!(!first.contains("<p"), "tags leaked into the text: {first:?}");
+        assert!(
+            !first.contains("<p"),
+            "tags leaked into the text: {first:?}"
+        );
         assert!(first.trim().len() > 3, "section is not empty: {first:?}");
     }
 
@@ -605,12 +633,16 @@ mod tests {
     <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
   </rootfiles>
 </container>"#;
-        assert_eq!(container_rootfile(xml).as_deref(), Some("OEBPS/content.opf"));
+        assert_eq!(
+            container_rootfile(xml).as_deref(),
+            Some("OEBPS/content.opf")
+        );
     }
 
     #[test]
     fn container_rootfile_at_root() {
-        let xml = br#"<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#;
+        let xml =
+            br#"<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#;
         assert_eq!(container_rootfile(xml).as_deref(), Some("content.opf"));
     }
 
@@ -618,8 +650,14 @@ mod tests {
     fn missing_or_broken_container_yields_none() {
         assert_eq!(container_rootfile(b""), None);
         assert_eq!(container_rootfile(b"<container><broken"), None);
-        assert_eq!(container_rootfile(b"<container><rootfiles/></container>"), None);
-        assert_eq!(container_rootfile(b"<c><rootfile full-path=\"\"/></c>"), None);
+        assert_eq!(
+            container_rootfile(b"<container><rootfiles/></container>"),
+            None
+        );
+        assert_eq!(
+            container_rootfile(b"<c><rootfile full-path=\"\"/></c>"),
+            None
+        );
     }
 
     #[test]
@@ -648,7 +686,10 @@ mod tests {
 </package>"#;
 
         let pkg = parse_package(opf.as_bytes());
-        assert_eq!(pkg.metadata.title, "Tập 3 - Chị đang được gọi đấy, Darkness-san");
+        assert_eq!(
+            pkg.metadata.title,
+            "Tập 3 - Chị đang được gọi đấy, Darkness-san"
+        );
         assert_eq!(pkg.metadata.authors, "Natsume Akatsuki\nNguyễn Dịch Giả");
         assert_eq!(pkg.metadata.language, "vi");
         assert_eq!(pkg.metadata.publisher, "konovn.net");

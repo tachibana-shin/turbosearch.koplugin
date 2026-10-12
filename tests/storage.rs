@@ -7,15 +7,15 @@ use std::fs;
 use std::path::PathBuf;
 
 use turbosearch::storage::{
+    Engine, MAX_BOOKS,
     book::{
-        path_in_scope, scan_full, scan_scope, scan_with_mode, Book, FileEntry, FileFilter, Format,
-        ScanMode, ScanPlan, ScopeFilter,
+        Book, FileEntry, FileFilter, Format, ScanMode, ScanPlan, ScopeFilter, path_in_scope,
+        scan_full, scan_scope, scan_with_mode,
     },
     config::{
-        Config, IndexDepth, PrefixMode, DEFAULT_EXCLUDE, DEFAULT_EXCLUDE_DIRS, DEFAULT_INCLUDE,
+        Config, DEFAULT_EXCLUDE, DEFAULT_EXCLUDE_DIRS, DEFAULT_INCLUDE, IndexDepth, PrefixMode,
     },
-    meta::{Meta, Status, CODEC_VERSION, NORMALIZER_VERSION, SCHEMA_VERSION, TOKENIZER_VERSION},
-    Engine, MAX_BOOKS,
+    meta::{CODEC_VERSION, Meta, NORMALIZER_VERSION, SCHEMA_VERSION, Status, TOKENIZER_VERSION},
 };
 
 /// Body long enough to pass the default 5 KiB minimum file size.
@@ -114,7 +114,12 @@ fn meta_roundtrips_through_database() {
 fn meta_rewrites_in_place() {
     let s = Shelf::new("meta-rewrite");
     s.engine.write_meta(&Meta::new()).unwrap();
-    s.engine.write_meta(&Meta { book_id_hwm: 5, ..Meta::new() }).unwrap();
+    s.engine
+        .write_meta(&Meta {
+            book_id_hwm: 5,
+            ..Meta::new()
+        })
+        .unwrap();
 
     let rows = s.engine.meta().unwrap();
     assert_eq!(rows.map(|m| m.book_id_hwm), Some(5));
@@ -133,7 +138,10 @@ fn meta_version_gates_are_independent() {
     for mutate in cases {
         let mut m = Meta::new();
         mutate(&mut m);
-        assert!(!m.is_compatible(), "a version bump must invalidate the file");
+        assert!(
+            !m.is_compatible(),
+            "a version bump must invalidate the file"
+        );
     }
     assert!(Meta::new().is_compatible());
 }
@@ -144,7 +152,12 @@ fn meta_version_constants_are_monotonic() {
     // These are pinned values: bumping one without rebuilding the file is a
     // correctness bug, so the test records what the build actually shipped.
     assert_eq!(
-        (SCHEMA_VERSION, TOKENIZER_VERSION, NORMALIZER_VERSION, CODEC_VERSION),
+        (
+            SCHEMA_VERSION,
+            TOKENIZER_VERSION,
+            NORMALIZER_VERSION,
+            CODEC_VERSION
+        ),
         (1, 1, 1, 1),
         "version constants changed; update note.md section 2 alongside"
     );
@@ -173,8 +186,16 @@ fn put_book_is_visible_to_both_tables() {
     s.engine.put_book(1, &b).unwrap();
 
     assert_eq!(s.engine.book(1).unwrap(), Some(b.clone()));
-    assert_eq!(s.engine.book_id_for_path("documents/One.epub").unwrap(), Some(1));
-    assert!(s.engine.book_id_for_path("documents/Missing.epub").unwrap().is_none());
+    assert_eq!(
+        s.engine.book_id_for_path("documents/One.epub").unwrap(),
+        Some(1)
+    );
+    assert!(
+        s.engine
+            .book_id_for_path("documents/Missing.epub")
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(s.engine.book(999).unwrap(), None);
 }
 
@@ -188,7 +209,11 @@ fn put_book_overwrites_same_id() {
     s.engine.put_book(1, &b).unwrap();
 
     assert_eq!(s.engine.book(1).unwrap(), Some(b));
-    assert_eq!(s.engine.all_books().unwrap().len(), 1, "id must not duplicate");
+    assert_eq!(
+        s.engine.all_books().unwrap().len(),
+        1,
+        "id must not duplicate"
+    );
     assert_eq!(s.engine.read_paths().unwrap().len(), 1);
 }
 
@@ -208,16 +233,27 @@ fn remove_book_is_idempotent() {
     let s = Shelf::new("remove-twice");
     s.engine.put_book(1, &book("a.epub", 10, 1)).unwrap();
     assert!(s.engine.remove_book(1).unwrap().is_some());
-    assert!(s.engine.remove_book(1).unwrap().is_none(), "second remove is a no-op");
+    assert!(
+        s.engine.remove_book(1).unwrap().is_none(),
+        "second remove is a no-op"
+    );
 }
 
 #[test]
 fn all_books_is_ordered_by_id() {
     let s = Shelf::new("all-books");
     for id in [7u16, 3, 11, 1] {
-        s.engine.put_book(id, &book(&format!("{id}.epub"), 10, id as i64)).unwrap();
+        s.engine
+            .put_book(id, &book(&format!("{id}.epub"), 10, id as i64))
+            .unwrap();
     }
-    let ids: Vec<u16> = s.engine.all_books().unwrap().into_iter().map(|(id, _)| id).collect();
+    let ids: Vec<u16> = s
+        .engine
+        .all_books()
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
     assert_eq!(ids, vec![1, 3, 7, 11]);
 }
 
@@ -260,7 +296,11 @@ fn book_flags_roundtrip_all_bits() {
             ..book(&format!("f{i}.epub"), 1, 1)
         };
         s.engine.put_book(i as u16, &b).unwrap();
-        assert_eq!(s.engine.book(i as u16).unwrap().unwrap().flags, bits, "flags {bits}");
+        assert_eq!(
+            s.engine.book(i as u16).unwrap().unwrap().flags,
+            bits,
+            "flags {bits}"
+        );
     }
 }
 
@@ -299,7 +339,11 @@ fn format_from_extension_covers_defaults() {
         let f = Format::from_extension(ext);
         assert_ne!(f, Format::Unknown, "extension {ext} must map to a format");
     }
-    assert_eq!(Format::from_extension("EPUB"), Format::Epub, "case-insensitive");
+    assert_eq!(
+        Format::from_extension("EPUB"),
+        Format::Epub,
+        "case-insensitive"
+    );
     assert_eq!(Format::from_extension("nope"), Format::Unknown);
 }
 
@@ -340,7 +384,11 @@ fn allocate_persists_high_water_mark() {
     // Reopen: the mark must survive a restart.
     let e = Engine::open(&path).unwrap();
     let next = e.allocate_ids(1).unwrap().unwrap();
-    assert_eq!(next, vec![10], "high-water mark must persist across restarts");
+    assert_eq!(
+        next,
+        vec![10],
+        "high-water mark must persist across restarts"
+    );
 }
 
 #[test]
@@ -387,15 +435,20 @@ fn scan_is_idempotent_when_nothing_changes() {
     let plan1 = s.scan().unwrap();
     assert_eq!(plan1.new.len(), 1);
     let entry = plan1.new[0].clone();
-    s.engine.put_book(1, &book(
-        &entry.path.to_string_lossy(),
-        entry.size,
-        entry.mtime_ms,
-    )).unwrap();
+    s.engine
+        .put_book(
+            1,
+            &book(&entry.path.to_string_lossy(), entry.size, entry.mtime_ms),
+        )
+        .unwrap();
 
     let plan2 = s.scan().unwrap();
     assert_eq!(plan2.new.len(), 0, "nothing new on the second pass");
-    assert_eq!(plan2.unchanged.len(), 1, "the file is now known and unchanged");
+    assert_eq!(
+        plan2.unchanged.len(),
+        1,
+        "the file is now known and unchanged"
+    );
     assert!(!plan2.needs_work());
 }
 
@@ -406,11 +459,19 @@ fn scan_detects_a_rewritten_file() {
     fs::write(&p, BODY.as_bytes()).unwrap();
     let plan = s.scan().unwrap();
     let e = &plan.new[0];
-    s.engine.put_book(1, &book(&e.path.to_string_lossy(), e.size, e.mtime_ms)).unwrap();
+    s.engine
+        .put_book(1, &book(&e.path.to_string_lossy(), e.size, e.mtime_ms))
+        .unwrap();
 
     // Same path, different size and mtime.
     std::thread::sleep(std::time::Duration::from_millis(20));
-    fs::write(&p, "rewritten, and comfortably past the 5 KiB floor".repeat(200).as_bytes()).unwrap();
+    fs::write(
+        &p,
+        "rewritten, and comfortably past the 5 KiB floor"
+            .repeat(200)
+            .as_bytes(),
+    )
+    .unwrap();
 
     let plan = s.scan().unwrap();
     assert_eq!(plan.updated.len(), 1, "size+mtime change must be detected");
@@ -427,7 +488,9 @@ fn scan_mtime_granularity_is_handled() {
     fs::write(&p, "aaaa").unwrap();
     let plan = s.scan().unwrap();
     let e = &plan.new[0];
-    s.engine.put_book(1, &book(&e.path.to_string_lossy(), e.size, e.mtime_ms)).unwrap();
+    s.engine
+        .put_book(1, &book(&e.path.to_string_lossy(), e.size, e.mtime_ms))
+        .unwrap();
     fs::write(&p, "bbbb").unwrap();
 
     let plan = s.scan().unwrap();
@@ -443,16 +506,21 @@ fn scan_finds_deleted_books() {
     s.write_file("b.epub", BODY);
     let plan = s.scan().unwrap();
     for (i, e) in plan.new.iter().enumerate() {
-        s.engine.put_book(i as u16, &book(
-            &e.path.to_string_lossy(),
-            e.size,
-            e.mtime_ms,
-        )).unwrap();
+        s.engine
+            .put_book(
+                i as u16,
+                &book(&e.path.to_string_lossy(), e.size, e.mtime_ms),
+            )
+            .unwrap();
     }
     fs::remove_file(s.dir.path().join("a.epub")).unwrap();
 
     let plan = s.scan().unwrap();
-    assert_eq!(plan.missing.len(), 1, "the removed file is reported missing");
+    assert_eq!(
+        plan.missing.len(),
+        1,
+        "the removed file is reported missing"
+    );
     assert_eq!(plan.unchanged.len(), 1);
 }
 
@@ -467,8 +535,12 @@ fn scan_orders_work_by_mtime_descending() {
     let now = std::time::SystemTime::now();
     for (i, name) in ["old.epub", "mid.epub", "new.epub"].iter().enumerate() {
         let t = now - std::time::Duration::from_secs(3600 * (3 - i as u64));
-        let f = fs::File::options().write(true).open(s.dir.path().join(name)).unwrap();
-        f.set_times(fs::FileTimes::new().set_accessed(t).set_modified(t)).unwrap();
+        let f = fs::File::options()
+            .write(true)
+            .open(s.dir.path().join(name))
+            .unwrap();
+        f.set_times(fs::FileTimes::new().set_accessed(t).set_modified(t))
+            .unwrap();
     }
 
     let plan = s.scan().unwrap();
@@ -501,11 +573,20 @@ fn size_bounds_are_enforced() {
         .iter()
         .map(|e| e.path.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert!(!names.contains(&"tiny.epub".to_string()), "below min size is skipped");
-    assert!(names.contains(&"big.epub".to_string()), "in-range files are scanned");
+    assert!(
+        !names.contains(&"tiny.epub".to_string()),
+        "below min size is skipped"
+    );
+    assert!(
+        names.contains(&"big.epub".to_string()),
+        "in-range files are scanned"
+    );
 
     // Now set a tight maximum and confirm the large file drops out.
-    let cfg = Config { max_file_size: 50 * 1024, ..Config::default() };
+    let cfg = Config {
+        max_file_size: 50 * 1024,
+        ..Config::default()
+    };
     let plan = scan_with_mode(
         &s.engine,
         &cfg.filter(),
@@ -519,7 +600,10 @@ fn size_bounds_are_enforced() {
         .map(|e| e.path.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
     assert!(names.contains(&"big.epub".to_string()));
-    assert!(!names.contains(&"huge.epub".to_string()), "above max size is skipped");
+    assert!(
+        !names.contains(&"huge.epub".to_string()),
+        "above max size is skipped"
+    );
 }
 
 #[test]
@@ -565,7 +649,9 @@ fn scan_tolerates_permission_denied_subdirectory() {
     let file_root = s.dir.path().join("a.epub");
     let plan = s.scan().unwrap();
     let e = &plan.new[0];
-    s.engine.put_book(1, &book(&e.path.to_string_lossy(), e.size, e.mtime_ms)).unwrap();
+    s.engine
+        .put_book(1, &book(&e.path.to_string_lossy(), e.size, e.mtime_ms))
+        .unwrap();
 
     // The scan over a bogus root must not panic or error.
     let plan2 = scan_with_mode(&s.engine, &s.filter(), &[file_root], ScanMode::Scope).unwrap();
@@ -585,7 +671,9 @@ fn scan_reports_missing_only_when_a_root_is_readable() {
     s.write_file("a.epub", BODY);
     let plan = s.scan().unwrap();
     let e = &plan.new[0];
-    s.engine.put_book(1, &book(&e.path.to_string_lossy(), e.size, e.mtime_ms)).unwrap();
+    s.engine
+        .put_book(1, &book(&e.path.to_string_lossy(), e.size, e.mtime_ms))
+        .unwrap();
 
     // A readable root with the file deleted: the book is genuinely gone.
     fs::remove_file(s.dir.path().join("a.epub")).unwrap();
@@ -678,7 +766,9 @@ fn extension_matching_is_case_insensitive() {
 #[test]
 fn junk_extensions_are_rejected() {
     let c = Config::default();
-    for ext in ["log", "lua", "json", "css", "png", "pdf", "djvu", "cbz", "kfx", "tmp"] {
+    for ext in [
+        "log", "lua", "json", "css", "png", "pdf", "djvu", "cbz", "kfx", "tmp",
+    ] {
         assert!(!c.accepts_extension(ext), "{ext} must be excluded");
     }
 }
@@ -690,15 +780,24 @@ fn junk_extensions_are_rejected() {
 fn index_depth_presets_are_ordered_and_default_to_full() {
     assert!(IndexDepth::FULL.0 > IndexDepth::BALANCED.0);
     assert!(IndexDepth::BALANCED.0 > IndexDepth::LIGHT.0);
-    assert!(IndexDepth::default().is_full(), "full positional is the default");
+    assert!(
+        IndexDepth::default().is_full(),
+        "full positional is the default"
+    );
     assert_eq!(IndexDepth::FULL.0, u32::MAX, "full means no cap at all");
 }
 
 #[test]
 fn prefix_mode_roundtrips_all_variants() {
     let s = Shelf::new("prefix-modes");
-    for (i, mode) in [PrefixMode::Auto, PrefixMode::Exact, PrefixMode::Prefix].into_iter().enumerate() {
-        let c = Config { prefix_mode: mode, ..Config::default() };
+    for (i, mode) in [PrefixMode::Auto, PrefixMode::Exact, PrefixMode::Prefix]
+        .into_iter()
+        .enumerate()
+    {
+        let c = Config {
+            prefix_mode: mode,
+            ..Config::default()
+        };
         s.engine.set_config(&c).unwrap();
         assert_eq!(s.engine.config().unwrap().prefix_mode, mode, "case {i}");
     }
@@ -726,7 +825,10 @@ fn content_hash_ignores_file_selection_settings() {
 fn content_hash_tracks_token_stream_settings() {
     let a = Config::default();
     {
-        let mut b = Config { index_depth: IndexDepth::BALANCED, ..Config::default() };
+        let mut b = Config {
+            index_depth: IndexDepth::BALANCED,
+            ..Config::default()
+        };
         b.min_file_size = a.min_file_size;
         assert_ne!(a.content_hash(), b.content_hash(), "depth changes tokens");
     }
@@ -758,18 +860,28 @@ fn failed_write_rolls_back() {
             .insert("x", b"junk".as_slice())?;
         Err::<(), _>(redb::Error::Corrupted("synthetic failure".into()).into())
     });
-    assert_eq!(s.engine.config().unwrap(), Config::default(), "no partial write");
+    assert_eq!(
+        s.engine.config().unwrap(),
+        Config::default(),
+        "no partial write"
+    );
 }
 
 #[test]
 fn file_size_grows_and_compaction_keeps_data() {
     let mut s = Shelf::new("size-compact");
     for i in 0..40u16 {
-        s.engine.put_book(i, &book(&format!("b{i}.epub"), i as u64 + 1, i as i64)).unwrap();
+        s.engine
+            .put_book(i, &book(&format!("b{i}.epub"), i as u64 + 1, i as i64))
+            .unwrap();
     }
     assert!(s.engine.file_size() > 0);
     let _ = s.engine.compact();
-    assert_eq!(s.engine.all_books().unwrap().len(), 40, "compaction loses nothing");
+    assert_eq!(
+        s.engine.all_books().unwrap().len(),
+        40,
+        "compaction loses nothing"
+    );
 }
 
 #[test]
@@ -791,8 +903,16 @@ fn table_names_match_the_spec() {
     // These strings are the on-disk schema; renaming one orphans user data.
     use turbosearch::storage::*;
     let names = [
-        TABLE_META, TABLE_BOOKS, TABLE_PATHS, TABLE_CONFIG, TABLE_METADATA,
-        TABLE_METAIDX, TABLE_DICT, TABLE_DICT_DELTA, TABLE_POSTINGS, TABLE_ENTRYMAP,
+        TABLE_META,
+        TABLE_BOOKS,
+        TABLE_PATHS,
+        TABLE_CONFIG,
+        TABLE_METADATA,
+        TABLE_METAIDX,
+        TABLE_DICT,
+        TABLE_DICT_DELTA,
+        TABLE_POSTINGS,
+        TABLE_ENTRYMAP,
     ];
     assert_eq!(names[0], "meta");
     assert_eq!(names[1], "books");
@@ -897,7 +1017,10 @@ fn full_scan_after_scope_scan_does_not_delete_the_scoped_books() {
     let plan = scan_scope(&s.engine, &s.filter(), &scope).unwrap();
     for (i, e) in plan.new.iter().enumerate() {
         s.engine
-            .put_book(i as u16, &book(&e.path.to_string_lossy(), e.size, e.mtime_ms))
+            .put_book(
+                i as u16,
+                &book(&e.path.to_string_lossy(), e.size, e.mtime_ms),
+            )
             .unwrap();
     }
 
@@ -929,7 +1052,10 @@ fn deleting_a_book_inside_the_scanned_root_is_reported() {
     let plan = scan_scope(&s.engine, &s.filter(), &scope).unwrap();
     for (i, e) in plan.new.iter().enumerate() {
         s.engine
-            .put_book(i as u16, &book(&e.path.to_string_lossy(), e.size, e.mtime_ms))
+            .put_book(
+                i as u16,
+                &book(&e.path.to_string_lossy(), e.size, e.mtime_ms),
+            )
             .unwrap();
     }
     fs::remove_file(s.dir.path().join("scope/a.epub")).unwrap();
@@ -957,7 +1083,10 @@ fn path_in_scope_handles_boundaries() {
     assert!(path_in_scope("/a/b", "/a/b"), "the scope itself counts");
     assert!(!path_in_scope("/a/bc/d.epub", "/a/b"));
     assert!(!path_in_scope("/a", "/a/b"));
-    assert!(path_in_scope("/anything", ""), "an empty scope means no restriction");
+    assert!(
+        path_in_scope("/anything", ""),
+        "an empty scope means no restriction"
+    );
 }
 
 #[test]
@@ -976,7 +1105,13 @@ fn scope_search_is_cheap_relative_to_a_full_scan() {
     // 1 book indexed instead of 41.
     assert_eq!(plan.new.len(), 1);
     assert_eq!(
-        plan.new.len() * 100 / scan_with_mode(&s.engine, &s.filter(), &[s.dir.path().to_path_buf()], ScanMode::Full)
+        plan.new.len() * 100
+            / scan_with_mode(
+                &s.engine,
+                &s.filter(),
+                &[s.dir.path().to_path_buf()],
+                ScanMode::Full
+            )
             .unwrap()
             .new
             .len(),

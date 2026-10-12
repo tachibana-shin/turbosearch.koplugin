@@ -33,7 +33,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let text = turbosearch::format::html::extract_text(&raw)?;
         cold.push((t0.elapsed(), text.len()));
     }
-    let avg_cold: f64 = cold.iter().map(|(d, _)| d.as_secs_f64()).sum::<f64>() / runs as f64 * 1000.0;
+    let avg_cold: f64 =
+        cold.iter().map(|(d, _)| d.as_secs_f64()).sum::<f64>() / runs as f64 * 1000.0;
     let avg_len: usize = cold.iter().map(|(_, l)| *l).sum::<usize>() / runs;
 
     // 2. Tokenize one section, which the preview needs to locate the word.
@@ -85,10 +86,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("sections        : {}", section.sections.len());
     println!();
     println!("cold: open zip + read 1 entry + strip HTML : {avg_cold:.1} ms  (entry {avg_len} B)");
-    println!("tokenize 1 section ({tokens} tokens)      : {tok_ms:.1} ms", tokens = spans.len());
+    println!(
+        "tokenize 1 section ({tokens} tokens)      : {tok_ms:.1} ms",
+        tokens = spans.len()
+    );
     println!("slice a 200-byte window                    : {slice_ms:.3} ms");
     println!("warm: read one more entry from an open zip: {warm_ms:.1} ms");
     println!();
-    println!("=> one preview ~ {:.1} ms cold, ~{:.2} ms warm", avg_cold + tok_ms, warm_ms + slice_ms);
+    println!(
+        "=> one preview ~ {:.1} ms cold, ~{:.2} ms warm",
+        avg_cold + tok_ms,
+        warm_ms + slice_ms
+    );
     Ok(())
 }

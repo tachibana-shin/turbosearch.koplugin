@@ -11,9 +11,7 @@ use turbosearch::format::sniff::{detect, is_text_format};
 use turbosearch::storage::book::Format;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = PathBuf::from(
-        std::env::args().nth(1).unwrap_or_else(|| ".".to_string()),
-    );
+    let root = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| ".".to_string()));
     let mut files = Vec::new();
     walk(&root, &mut files);
     files.sort();
@@ -35,7 +33,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if sniffed != claimed {
             mismatched.push((
-                path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
                 claimed,
                 sniffed,
             ));
@@ -50,7 +51,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("text-bearing: {text} of {}", files.len());
 
     if !mismatched.is_empty() {
-        println!("\n--- extension disagrees with contents ({} files) ---", mismatched.len());
+        println!(
+            "\n--- extension disagrees with contents ({} files) ---",
+            mismatched.len()
+        );
         for (name, claimed, sniffed) in mismatched.iter().take(15) {
             println!("  {name}\n      claimed {claimed:?} -> actually {sniffed:?}");
         }
@@ -62,7 +66,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {

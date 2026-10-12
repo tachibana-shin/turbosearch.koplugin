@@ -9,7 +9,7 @@
 //! boundary, so the position column must be split into monotone runs before it is
 //! handed to this coder (see `mod::split_runs`).
 
-use super::bits::{bits_for, BitReader, BitWriter};
+use super::bits::{BitReader, BitWriter, bits_for};
 use super::vbyte;
 use std::io;
 
@@ -21,7 +21,10 @@ pub fn encode(values: &[u32], universe: u32) -> Vec<u8> {
         values.windows(2).all(|w| w[0] < w[1]),
         "BIC requires a strictly increasing input"
     );
-    debug_assert!(values.last().is_none_or(|&m| m < universe), "value exceeds universe");
+    debug_assert!(
+        values.last().is_none_or(|&m| m < universe),
+        "value exceeds universe"
+    );
     debug_assert!(values.len() as u64 <= universe as u64);
 
     let mut out = Vec::new();
@@ -70,7 +73,10 @@ fn encode_recursive(writer: &mut BitWriter, values: &[u32], lo: u64, hi: u64) {
 
 pub fn decode(bytes: &[u8]) -> io::Result<Vec<u32>> {
     if bytes.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "empty BIC block"));
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "empty BIC block",
+        ));
     }
     let mut pos = 0usize;
     let universe = vbyte::read_leb128(bytes, &mut pos)?;
@@ -87,21 +93,16 @@ pub fn decode(bytes: &[u8]) -> io::Result<Vec<u32>> {
         return Ok(Vec::new());
     }
 
-    let payload = bytes.get(pos..).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::UnexpectedEof, "missing BIC payload")
-    })?;
+    let payload = bytes
+        .get(pos..)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "missing BIC payload"))?;
     let mut reader = BitReader::new(payload);
     let mut out = vec![0u32; n];
     decode_recursive(&mut reader, &mut out, 0, universe as u64 - 1)?;
     Ok(out)
 }
 
-fn decode_recursive(
-    reader: &mut BitReader,
-    out: &mut [u32],
-    lo: u64,
-    hi: u64,
-) -> io::Result<()> {
+fn decode_recursive(reader: &mut BitReader, out: &mut [u32], lo: u64, hi: u64) -> io::Result<()> {
     let n = out.len();
     if n == 0 {
         return Ok(());
@@ -118,9 +119,9 @@ fn decode_recursive(
 
     let bits = bits_for(range);
     let pivot = reader.read_bits(bits) + lo;
-    let pivot_u32: u32 = pivot.try_into().map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "BIC pivot exceeds u32")
-    })?;
+    let pivot_u32: u32 = pivot
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "BIC pivot exceeds u32"))?;
 
     let mid = n / 2;
     out[mid] = pivot_u32;
@@ -180,7 +181,12 @@ mod tests {
         // All slots occupied: payload needs zero bits.
         let vals: Vec<u32> = (0..64).collect();
         let bytes = encode(&vals, 64);
-        assert_eq!(bytes.len(), 2, "expected header only, got {} bytes", bytes.len());
+        assert_eq!(
+            bytes.len(),
+            2,
+            "expected header only, got {} bytes",
+            bytes.len()
+        );
         assert_eq!(decode(&bytes).unwrap(), vals);
     }
 
@@ -222,14 +228,21 @@ mod tests {
 
         // Each run must be strictly increasing.
         for (_, run) in &runs {
-            assert!(run.windows(2).all(|w| w[0] < w[1]), "run {run:?} not increasing");
+            assert!(
+                run.windows(2).all(|w| w[0] < w[1]),
+                "run {run:?} not increasing"
+            );
         }
 
         // Runs must tile the input exactly, in order.
         let mut rebuilt: Vec<u32> = Vec::new();
         for (start, run) in &runs {
             rebuilt.extend_from_slice(run);
-            assert_eq!(*start, rebuilt.len() - run.len(), "run offsets not contiguous");
+            assert_eq!(
+                *start,
+                rebuilt.len() - run.len(),
+                "run offsets not contiguous"
+            );
         }
         assert_eq!(rebuilt, vals);
     }

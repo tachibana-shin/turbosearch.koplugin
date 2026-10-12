@@ -50,7 +50,10 @@ pub fn from_sidecar(path: &Path) -> Option<BookMetaRecord> {
         return None;
     }
 
-    let mut record = BookMetaRecord::new(title, lua_string_field(&props, "authors").unwrap_or_default());
+    let mut record = BookMetaRecord::new(
+        title,
+        lua_string_field(&props, "authors").unwrap_or_default(),
+    );
     // The sidecar joins multiple values with a real newline, written as a Lua
     // line continuation, which is the same convention the OPF path uses.
     record.authors = unescape_lua(&record.authors);
@@ -69,12 +72,13 @@ pub fn from_sidecar(path: &Path) -> Option<BookMetaRecord> {
 
     // `stats` carries the same title and sometimes a fuller author list.
     if let Some(stats) = lua_table_field(&text, "stats")
-        && let Some(authors) = lua_string_field(&stats, "authors") {
-            let authors = unescape_lua(&authors);
-            if !authors.trim().is_empty() && record.authors.trim().is_empty() {
-                record.authors = authors;
-            }
+        && let Some(authors) = lua_string_field(&stats, "authors")
+    {
+        let authors = unescape_lua(&authors);
+        if !authors.trim().is_empty() && record.authors.trim().is_empty() {
+            record.authors = authors;
         }
+    }
 
     Some(record)
 }
@@ -105,10 +109,7 @@ pub fn from_embedded(path: &Path) -> Option<BookMetaRecord> {
     // `crate::format::fb2`.
     match epub::open(path) {
         Ok(content) if !content.metadata.title.is_empty() => {
-            let mut record = BookMetaRecord::new(
-                content.metadata.title,
-                content.metadata.authors,
-            );
+            let mut record = BookMetaRecord::new(content.metadata.title, content.metadata.authors);
             record.language = content.metadata.language;
             record.series = content.metadata.series;
             record.series_index = content.metadata.series_index;
@@ -139,7 +140,9 @@ fn from_palmdb(path: &Path) -> Option<BookMetaRecord> {
     // The schema has no tag column, so EXTH subjects are dropped rather than
     // shoe-horned into `description`, which the reader is shown verbatim.
     if !book.metadata.isbn.is_empty() {
-        record.identifiers.push(format!("isbn:{}", book.metadata.isbn));
+        record
+            .identifiers
+            .push(format!("isbn:{}", book.metadata.isbn));
     }
     record.provenance = Provenance::Embedded;
     Some(record)
@@ -332,7 +335,10 @@ Ninh Nhân Văn (dịch)",
         let record = from_sidecar(&book).expect("the sidecar should parse");
         assert_eq!(record.title, "Yến Tiệc Của Sherlockian Và Bão Tố Mùa Xuân");
         assert_eq!(record.authors, "Mai Mochizuki\nNinh Nhân Văn (dịch)");
-        assert_eq!(record.author_list(), vec!["Mai Mochizuki", "Ninh Nhân Văn (dịch)"]);
+        assert_eq!(
+            record.author_list(),
+            vec!["Mai Mochizuki", "Ninh Nhân Văn (dịch)"]
+        );
         assert_eq!(record.language, "vi");
         assert_eq!(record.series, "Holmes ở Kyoto");
         assert_eq!(record.series_index, 5000);
@@ -347,7 +353,10 @@ Ninh Nhân Văn (dịch)",
         let dir = tempdir().unwrap();
         let book = dir.path().join("b.epub");
         write(&book, "x");
-        write(&dir.path().join("b.sdr/metadata.epub.lua"), r#"return { ["doc_props"] = {} }"#);
+        write(
+            &dir.path().join("b.sdr/metadata.epub.lua"),
+            r#"return { ["doc_props"] = {} }"#,
+        );
         assert!(from_sidecar(&book).is_none());
     }
 
@@ -376,7 +385,10 @@ Ninh Nhân Văn (dịch)",
         let dir = tempdir().unwrap();
         let book = dir.path().join("A Weird (99).Name.epub");
         write(&book, "x");
-        write(&dir.path().join("A Weird (99).Name.sdr/metadata.epub.lua"), "x");
+        write(
+            &dir.path().join("A Weird (99).Name.sdr/metadata.epub.lua"),
+            "x",
+        );
         assert!(sidecar_path(&book).is_some());
     }
 
@@ -458,7 +470,10 @@ Ninh Nhân Văn (dịch)",
         ["doc_props"] = { ["title"] = "first" },
         ["summary"] = { ["title"] = "second" },
     }"#;
-        assert_eq!(lua_string_field(&lua_table_field(lua, "doc_props").unwrap(), "title").as_deref(), Some("first"));
+        assert_eq!(
+            lua_string_field(&lua_table_field(lua, "doc_props").unwrap(), "title").as_deref(),
+            Some("first")
+        );
     }
 
     // --- provenance ordering ---------------------------------------------------

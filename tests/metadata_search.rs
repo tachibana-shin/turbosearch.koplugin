@@ -24,9 +24,7 @@ impl Store {
 }
 
 fn library_root() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let p = PathBuf::from(home).join(".config/koreader/rakuyomi/downloads/calibre");
-    p.is_dir().then_some(p)
+    turbosearch::library::root()
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -74,7 +72,8 @@ fn build_sample(limit: usize) -> Option<(Store, usize)> {
         // A BOOKS row is required, not decoration: `METAIDX` is rebuilt only for
         // ids that still exist in `BOOKS`, so a metadata row without one is an
         // orphan and is skipped.
-        store.engine
+        store
+            .engine
             .put_book(
                 id,
                 &turbosearch::storage::Book {
@@ -104,6 +103,7 @@ fn find(store: &Store, query: &str) -> Vec<String> {
 }
 
 #[test]
+#[ignore = "needs a reference library: set TURBOSEARCH_LIBRARY"]
 fn a_prefix_of_an_accented_author_finds_the_book() {
     let Some((store, indexed)) = build_sample(120) else {
         eprintln!("library not present; skipping");
@@ -131,10 +131,16 @@ fn the_full_name_finds_more_than_a_single_fragment() {
     // Not every book in the sample is by this author, so only assert that the
     // longer query is a subset of the shorter one's results.
     let short = find(&store, "nguyen");
-    assert!(hits.len() <= short.len(), "{} vs {}", hits.len(), short.len());
+    assert!(
+        hits.len() <= short.len(),
+        "{} vs {}",
+        hits.len(),
+        short.len()
+    );
 }
 
 #[test]
+#[ignore = "needs a reference library: set TURBOSEARCH_LIBRARY"]
 fn the_sidecar_language_reaches_the_record() {
     // The reference library has books whose OPF says `en` and whose sidecar says
     // `vi`. The sidecar must win.
@@ -239,7 +245,8 @@ fn a_filename_fallback_is_searchable_too() {
     // A format with no metadata at all still has to be findable by its name.
     let store = Store::new("filename-fallback");
     let record = from_filename(Path::new("/documents/Tokyo Ravens - Chuong 13 (241).epub"));
-    store.engine
+    store
+        .engine
         .put_book(
             1,
             &turbosearch::storage::Book {

@@ -9,15 +9,16 @@ use std::path::{Path, PathBuf};
 use turbosearch::format::mobi;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = PathBuf::from(
-        std::env::args().nth(1).unwrap_or_else(|| ".".to_string()),
-    );
+    let root = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| ".".to_string()));
     let mut files = Vec::new();
     walk(&root, &mut files);
     files.sort();
 
     for path in &files {
-        println!("=== {}", path.file_name().unwrap_or_default().to_string_lossy());
+        println!(
+            "=== {}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
@@ -45,7 +46,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {

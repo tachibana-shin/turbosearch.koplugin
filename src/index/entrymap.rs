@@ -90,9 +90,9 @@ impl EntryMap {
         let mut pos = 0usize;
         let name_len = vbyte::read_leb128(bytes, &mut pos)
             .map_err(|_| ioerr("truncated entry map name length"))? as usize;
-        let name_end = pos.checked_add(name_len).ok_or_else(|| {
-            ioerr("entry map name length overruns the row")
-        })?;
+        let name_end = pos
+            .checked_add(name_len)
+            .ok_or_else(|| ioerr("entry map name length overruns the row"))?;
         let name = String::from_utf8(
             bytes
                 .get(pos..name_end)
@@ -200,8 +200,14 @@ mod tests {
         }
         let m = b.finish();
         assert_eq!(m.name, "ch");
-        assert_eq!(m.checkpoints.len(), 10_000usize / CHECKPOINT_INTERVAL as usize + 1);
-        assert_eq!(m.checkpoints[1], (CHECKPOINT_INTERVAL, CHECKPOINT_INTERVAL * 10));
+        assert_eq!(
+            m.checkpoints.len(),
+            10_000usize / CHECKPOINT_INTERVAL as usize + 1
+        );
+        assert_eq!(
+            m.checkpoints[1],
+            (CHECKPOINT_INTERVAL, CHECKPOINT_INTERVAL * 10)
+        );
     }
 
     #[test]
@@ -235,7 +241,10 @@ mod tests {
 
     #[test]
     fn byte_off_on_an_empty_map_is_none_not_a_panic() {
-        let m = EntryMap { name: "x".into(), checkpoints: vec![] };
+        let m = EntryMap {
+            name: "x".into(),
+            checkpoints: vec![],
+        };
         assert_eq!(m.byte_off(5), None);
         // checkpoint_for would index an empty vec, so callers must check first.
         assert!(m.checkpoints.is_empty());
@@ -278,7 +287,11 @@ mod tests {
         let encoded = m.encode();
         // ~488 checkpoints of two small deltas beats ~488 raw 8-byte pairs.
         assert_eq!(m.checkpoints.len(), 489);
-        assert!(encoded.len() < m.checkpoints.len() * 8, "{} bytes", encoded.len());
+        assert!(
+            encoded.len() < m.checkpoints.len() * 8,
+            "{} bytes",
+            encoded.len()
+        );
     }
 
     #[test]

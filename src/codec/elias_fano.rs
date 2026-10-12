@@ -8,7 +8,7 @@
 //! turns a non-decreasing input into a strictly increasing one without changing
 //! the decoded result (`x_i = y_i - i`).
 
-use super::bits::{bits_for, BitReader, BitWriter};
+use super::bits::{BitReader, BitWriter, bits_for};
 use super::vbyte;
 use std::io;
 
@@ -21,7 +21,10 @@ const TAG_FALLBACK: u8 = 1;
 /// # Panics
 /// Panics if `values` is not sorted in non-decreasing order.
 pub fn encode(values: &[u32]) -> Vec<u8> {
-    debug_assert!(values.windows(2).all(|w| w[0] <= w[1]), "input must be monotone");
+    debug_assert!(
+        values.windows(2).all(|w| w[0] <= w[1]),
+        "input must be monotone"
+    );
 
     let n = values.len();
     if n == 0 {
@@ -43,7 +46,11 @@ pub fn encode(values: &[u32]) -> Vec<u8> {
     }
 
     let y_max = x_max + n as u64 - 1;
-    let l_bits = if n <= 1 { 0 } else { bits_for(y_max / n as u64) };
+    let l_bits = if n <= 1 {
+        0
+    } else {
+        bits_for(y_max / n as u64)
+    };
 
     let mut out = vec![TAG_EF];
     vbyte::write_leb128(&mut out, n as u32);
@@ -82,7 +89,10 @@ pub fn encode(values: &[u32]) -> Vec<u8> {
 /// Decodes a stream produced by [`encode`].
 pub fn decode(bytes: &[u8]) -> io::Result<Vec<u32>> {
     if bytes.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "empty Elias-Fano block"));
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "empty Elias-Fano block",
+        ));
     }
     let tag = bytes[0];
     let mut pos = 1usize;
@@ -98,9 +108,10 @@ pub fn decode(bytes: &[u8]) -> io::Result<Vec<u32>> {
                 return Ok(Vec::new());
             }
             let _x_max = vbyte::read_leb128(bytes, &mut pos)?;
-            let l_bits = *bytes.get(pos).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::UnexpectedEof, "missing l_bits")
-            })? as u32;
+            let l_bits = *bytes
+                .get(pos)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "missing l_bits"))?
+                as u32;
             pos += 1;
 
             let lower_bytes = (n * l_bits as usize).div_ceil(8);
@@ -153,12 +164,20 @@ pub fn encoded_len(values: &[u32]) -> usize {
     let x_max = values[n - 1] as u64;
     if x_max + n as u64 > u32::MAX as u64 {
         // Fallback path: tag + n + each value as LEB128.
-        return 1 + vbyte::leb_len(n as u32) as usize
-            + values.iter().map(|v| vbyte::leb_len(*v) as usize).sum::<usize>();
+        return 1
+            + vbyte::leb_len(n as u32) as usize
+            + values
+                .iter()
+                .map(|v| vbyte::leb_len(*v) as usize)
+                .sum::<usize>();
     }
 
     let y_max = x_max + n as u64 - 1;
-    let l_bits = if n <= 1 { 0 } else { bits_for(y_max / n as u64) };
+    let l_bits = if n <= 1 {
+        0
+    } else {
+        bits_for(y_max / n as u64)
+    };
     let lower_bytes = (n * l_bits as usize).div_ceil(8);
     let upper_bits: u64 = n as u64 + (y_max >> l_bits) + 1;
     let upper_bytes = upper_bits.div_ceil(8) as usize;
@@ -216,7 +235,11 @@ mod tests {
         let vals: Vec<u32> = (0..1000).collect();
         let bytes = encode(&vals);
         assert_eq!(decode(&bytes).unwrap(), vals);
-        assert!(bytes.len() < 1000, "dense input compressed to {}", bytes.len());
+        assert!(
+            bytes.len() < 1000,
+            "dense input compressed to {}",
+            bytes.len()
+        );
     }
 
     #[test]
@@ -247,7 +270,12 @@ mod tests {
             vec![4; 1000],
         ];
         for vals in cases {
-            assert_eq!(encoded_len(&vals), encode(&vals).len(), "input {:?} prefix", &vals[..vals.len().min(3)]);
+            assert_eq!(
+                encoded_len(&vals),
+                encode(&vals).len(),
+                "input {:?} prefix",
+                &vals[..vals.len().min(3)]
+            );
         }
     }
 

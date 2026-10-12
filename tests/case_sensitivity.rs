@@ -40,7 +40,10 @@ fn doctype_detection_is_case_insensitive() {
         b"<!DOCTYPE HTML PUBLIC \"-//W3C//DTD XHTML 1.0//EN\"><html/>",
     ] {
         let (_d, p) = file_with("a.html", src);
-        assert_eq!(turbosearch::format::detect(&p), turbosearch::storage::book::Format::Html);
+        assert_eq!(
+            turbosearch::format::detect(&p),
+            turbosearch::storage::book::Format::Html
+        );
     }
 }
 
@@ -56,7 +59,10 @@ fn script_tags_are_dropped_whatever_their_case() {
         let text = turbosearch::format::html::extract_text(markup.as_bytes()).unwrap();
         let text = String::from_utf8(text).unwrap();
         assert!(text.contains("keep"), "case {markup:?} -> {text:?}");
-        assert!(!text.contains("leak"), "script body leaked for {markup:?}: {text:?}");
+        assert!(
+            !text.contains("leak"),
+            "script body leaked for {markup:?}: {text:?}"
+        );
     }
 }
 
@@ -71,14 +77,21 @@ fn style_and_head_are_dropped_whatever_their_case() {
         let text = turbosearch::format::html::extract_text(markup.as_bytes()).unwrap();
         let text = String::from_utf8(text).unwrap();
         assert!(text.contains("keep"), "{markup:?} -> {text:?}");
-        assert!(!text.contains("dropped"), "head content leaked for {markup:?}: {text:?}");
-        assert!(!text.contains("color"), "style content leaked for {markup:?}: {text:?}");
+        assert!(
+            !text.contains("dropped"),
+            "head content leaked for {markup:?}: {text:?}"
+        );
+        assert!(
+            !text.contains("color"),
+            "style content leaked for {markup:?}: {text:?}"
+        );
     }
 }
 
 #[test]
 fn all_caps_body_text_is_extracted() {
-    let text = turbosearch::format::html::extract_text(b"<BODY><P>SHERLOCK HOLMES</P></BODY>").unwrap();
+    let text =
+        turbosearch::format::html::extract_text(b"<BODY><P>SHERLOCK HOLMES</P></BODY>").unwrap();
     let text = String::from_utf8(text).unwrap();
     assert!(text.contains("SHERLOCK"), "{text}");
     assert!(!text.contains("BODY"), "tag names leaked: {text}");
@@ -107,7 +120,9 @@ fn media_types_are_matched_case_insensitively() {
 <item id="a" href="a.xhtml" media-type="Application/XHTML+XML"/>
 </manifest><spine><itemref idref="a"/></spine></package>"#;
     let pkg = turbosearch::format::epub::parse_package(opf);
-    assert!(turbosearch::format::epub::is_text_media_type(&pkg.manifest[0].media_type));
+    assert!(turbosearch::format::epub::is_text_media_type(
+        &pkg.manifest[0].media_type
+    ));
 }
 
 #[test]
@@ -126,28 +141,41 @@ fn href_case_mismatch_against_the_archive_entry_still_resolves() {
         std::io::Write::write_all(&mut zip, b"application/epub+zip").unwrap();
 
         zip.start_file("META-INF/container.xml", opts).unwrap();
-        std::io::Write::write_all(&mut zip, br#"<container><rootfiles>
-<rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#)
-            .unwrap();
+        std::io::Write::write_all(
+            &mut zip,
+            br#"<container><rootfiles>
+<rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#,
+        )
+        .unwrap();
 
         zip.start_file("OEBPS/content.opf", opts).unwrap();
-        std::io::Write::write_all(&mut zip, br#"<package><metadata>
+        std::io::Write::write_all(
+            &mut zip,
+            br#"<package><metadata>
 <dc:title>Case Test</dc:title></metadata>
 <manifest><item id="a" href="ChapterOne.XHTML" media-type="application/xhtml+xml"/></manifest>
-<spine><itemref idref="a"/></spine></package>"#)
-            .unwrap();
+<spine><itemref idref="a"/></spine></package>"#,
+        )
+        .unwrap();
 
         // The entry on disk is spelled differently from the href.
         zip.start_file("OEBPS/chapterone.xhtml", opts).unwrap();
-        std::io::Write::write_all(&mut zip, b"<html><body><p>Sherlock Holmes in Hanoi</p></body></html>")
-            .unwrap();
+        std::io::Write::write_all(
+            &mut zip,
+            b"<html><body><p>Sherlock Holmes in Hanoi</p></body></html>",
+        )
+        .unwrap();
 
         zip.finish().unwrap();
     }
 
     let content = turbosearch::format::epub::open(&path).expect("open a case-mismatched epub");
     assert_eq!(content.metadata.title, "Case Test");
-    assert_eq!(content.sections.len(), 1, "the section must be found despite case");
+    assert_eq!(
+        content.sections.len(),
+        1,
+        "the section must be found despite case"
+    );
     let text = String::from_utf8_lossy(&content.sections[0].text);
     assert!(text.contains("Sherlock"), "section text missing: {text}");
 }
@@ -161,7 +189,10 @@ fn xml_declaration_is_case_insensitive() {
         b"<?XmL version=\"1.0\"?><FictionBook xmlns=\"x\"/>",
     ] {
         let (_d, p) = file_with("a.fb2", src);
-        assert_eq!(turbosearch::format::detect(&p), turbosearch::storage::book::Format::Fb2);
+        assert_eq!(
+            turbosearch::format::detect(&p),
+            turbosearch::storage::book::Format::Fb2
+        );
     }
 }
 
@@ -197,7 +228,11 @@ fn container_entry_is_found_whatever_its_case() {
 
     let content = turbosearch::format::epub::open(&path).expect("open");
     assert_eq!(content.metadata.title, "Container Case");
-    assert_eq!(content.sections.len(), 1, "META-INF/Container.XML must be honoured");
+    assert_eq!(
+        content.sections.len(),
+        1,
+        "META-INF/Container.XML must be honoured"
+    );
 }
 
 #[test]
@@ -212,14 +247,24 @@ fn opf_attribute_names_are_matched_case_insensitively() {
 
     let pkg = turbosearch::format::epub::parse_package(opf);
     assert_eq!(pkg.metadata.title, "Attr Case");
-    assert_eq!(pkg.metadata.series, "Attributed", "meta NAME/CONTENT must match");
-    assert!(pkg.metadata.identifiers.iter().any(|i| i.contains("978-3-16")));
+    assert_eq!(
+        pkg.metadata.series, "Attributed",
+        "meta NAME/CONTENT must match"
+    );
+    assert!(
+        pkg.metadata
+            .identifiers
+            .iter()
+            .any(|i| i.contains("978-3-16"))
+    );
     assert_eq!(pkg.spine, vec!["a"], "IDREF must match idref");
 }
 
 #[test]
 fn lowercase_cdata_markers_are_handled() {
-    let text = turbosearch::format::html::extract_text(b"<body><![cdata[inside]]><p>out</p></body>").unwrap();
+    let text =
+        turbosearch::format::html::extract_text(b"<body><![cdata[inside]]><p>out</p></body>")
+            .unwrap();
     let text = String::from_utf8_lossy(&text);
     assert!(text.contains("inside"), "{text}");
     assert!(text.contains("out"), "{text}");

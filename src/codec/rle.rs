@@ -35,7 +35,12 @@ pub fn encode(values: &[u32]) -> Vec<u8> {
 /// Picks whichever of RLE and VByte is smaller for this input.
 pub fn encode_auto(values: &[u32]) -> Vec<u8> {
     let rle = encode(values);
-    let vbyte_size = 1 + 5 + values.iter().map(|v| vbyte::leb_len(*v) as usize).sum::<usize>();
+    let vbyte_size = 1
+        + 5
+        + values
+            .iter()
+            .map(|v| vbyte::leb_len(*v) as usize)
+            .sum::<usize>();
 
     if values.is_empty() {
         let mut out = Vec::new();
@@ -59,7 +64,10 @@ pub fn encode_auto(values: &[u32]) -> Vec<u8> {
 
 pub fn decode(bytes: &[u8]) -> io::Result<Vec<u32>> {
     if bytes.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "empty RLE block"));
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "empty RLE block",
+        ));
     }
     let tag = bytes[0];
     let mut pos = 1usize;
@@ -100,7 +108,11 @@ mod tests {
     fn constant_column_is_tiny() {
         let vals = vec![7u32; 4096];
         let bytes = encode(&vals);
-        assert!(bytes.len() < 16, "constant column compressed to {} bytes", bytes.len());
+        assert!(
+            bytes.len() < 16,
+            "constant column compressed to {} bytes",
+            bytes.len()
+        );
         assert_eq!(decode(&bytes).unwrap(), vals);
     }
 

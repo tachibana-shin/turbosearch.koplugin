@@ -10,14 +10,19 @@
 
 use std::time::Instant;
 
+use redb::ReadableTable;
 use turbosearch::index::posting::CHUNK_POSTINGS;
 use turbosearch::storage::Engine;
-use redb::ReadableTable;
 
 const SECTIONS: usize = 4;
 
 /// Column names, in the order `Chunk::encode` writes them.
-const NAMES: [&str; SECTIONS] = ["elias_fano(docs)", "pfor(freqs)", "rle(entries)", "pfor(pos_gaps)"];
+const NAMES: [&str; SECTIONS] = [
+    "elias_fano(docs)",
+    "pfor(freqs)",
+    "rle(entries)",
+    "pfor(pos_gaps)",
+];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args().nth(1).expect("db path");
@@ -47,7 +52,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // then length-prefixed sections.
             let mut pos = 20usize;
             for slot in &mut totals {
-                let Some(len) = bytes.get(pos..pos + 4) else { break };
+                let Some(len) = bytes.get(pos..pos + 4) else {
+                    break;
+                };
                 let len = u32::from_le_bytes([len[0], len[1], len[2], len[3]]) as usize;
                 pos += 4 + len;
                 header += 4;
@@ -72,12 +79,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("block bytes: {all} ({:.2} MB)", all as f64 / 1e6);
     for (name, n) in NAMES.iter().zip(totals) {
         let pct = n as f64 * 100.0 / all as f64;
-        let per = if postings > 0 { n as f64 / postings as f64 } else { 0.0 };
+        let per = if postings > 0 {
+            n as f64 / postings as f64
+        } else {
+            0.0
+        };
         println!("  {name:<18} {n:>12} ({pct:5.1}%)  {per:.2} B/posting");
     }
-    println!("  {:<18} {header:>12} ({:5.1}%)", "headers", header as f64 * 100.0 / all as f64);
+    println!(
+        "  {:<18} {header:>12} ({:5.1}%)",
+        "headers",
+        header as f64 * 100.0 / all as f64
+    );
     println!();
-    println!("  {:<18} {:>12} ({:5.1}%)  {:.2} B/posting", "total", all, 100.0, all as f64 / postings as f64);
+    println!(
+        "  {:<18} {:>12} ({:5.1}%)  {:.2} B/posting",
+        "total",
+        all,
+        100.0,
+        all as f64 / postings as f64
+    );
     report_table_sizes(&engine);
     Ok(())
 }
@@ -116,21 +137,57 @@ fn report_table_sizes(engine: &Engine) {
                 t.0,
                 t.0 as f64 / 1e6,
                 t.1,
-                if t.1 > 0 { t.0 as f64 / t.1 as f64 } else { 0.0 }
+                if t.1 > 0 {
+                    t.0 as f64 / t.1 as f64
+                } else {
+                    0.0
+                }
             );
             grand += t.0;
         }};
     }
 
-    row!("postings", turbosearch::storage::postings_table(), |k: &(&[u8], u16)| k.0.len() + 2);
-    row!("entrymap", turbosearch::storage::entrymap_table(), |_: &(u16, u16)| 4);
+    row!(
+        "postings",
+        turbosearch::storage::postings_table(),
+        |k: &(&[u8], u16)| k.0.len() + 2
+    );
+    row!(
+        "entrymap",
+        turbosearch::storage::entrymap_table(),
+        |_: &(u16, u16)| 4
+    );
     row!("dict", turbosearch::storage::dict_table(), |_: &&[u8]| 3);
-    row!("dict_delta", turbosearch::storage::delta_table(), |_: &&[u8]| 0);
-    row!("books", turbosearch::storage::book::books_table(), |_: &u16| 2);
-    row!("metadata", turbosearch::storage::metadata::metadata_table(), |_: &u16| 2);
-    row!("metaidx", turbosearch::storage::metadata::metaidx_table(), |_: &&str| 3);
-    row!("config", turbosearch::storage::config::config_table(), |_: &&str| 6);
+    row!(
+        "dict_delta",
+        turbosearch::storage::delta_table(),
+        |_: &&[u8]| 0
+    );
+    row!(
+        "books",
+        turbosearch::storage::book::books_table(),
+        |_: &u16| 2
+    );
+    row!(
+        "metadata",
+        turbosearch::storage::metadata::metadata_table(),
+        |_: &u16| 2
+    );
+    row!(
+        "metaidx",
+        turbosearch::storage::metadata::metaidx_table(),
+        |_: &&str| 3
+    );
+    row!(
+        "config",
+        turbosearch::storage::config::config_table(),
+        |_: &&str| 6
+    );
     row!("meta", turbosearch::storage::meta_table(), |_: &&str| 4);
 
-    println!("  {:<12} {grand:>12} bytes ({:.2} MB)", "total", grand as f64 / 1e6);
+    println!(
+        "  {:<12} {grand:>12} bytes ({:.2} MB)",
+        "total",
+        grand as f64 / 1e6
+    );
 }
