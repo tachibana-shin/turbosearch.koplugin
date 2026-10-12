@@ -122,6 +122,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut t_decode = std::time::Duration::ZERO;
     let mut t_loop = std::time::Duration::ZERO;
     let mut t_entrymap = std::time::Duration::ZERO;
+    let t_flush;
+    let t_enc;
+    let t_wr;
     let mut sections_total = 0usize;
     // `(book_id, metadata)` for every book, metadata-only formats included.
     let mut records: Vec<(u16, turbosearch::storage::metadata::BookMetaRecord)> = Vec::new();
@@ -283,6 +286,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
         w.close(&mut dict)?;
+        t_flush = w.time_flush();
+        t_enc = w.time_encode();
+        t_wr = w.time_write();
     }
     let t_books = started.elapsed();
 
@@ -332,7 +338,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("text {text_bytes} bytes, {tokens} tokens");
     println!("phases:");
     println!("  decode                : {:>8.1?}", t_decode);
-    println!("  tokenize + index      : {:>8.1?}", t_loop);
+    println!("  chunk encode          : {:>8.1?}", t_enc);
+    println!("  postings write        : {:>8.1?}", t_wr);
+    println!(
+        "  tokenize + index      : {:>8.1?}  (flush: {:>8.1?})",
+        t_loop, t_flush
+    );
     println!("  entry maps            : {:>8.1?}", t_entrymap);
     println!(
         "  postings flush + dict : {:>8.1?}",

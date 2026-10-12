@@ -502,6 +502,26 @@ impl Engine {
         })
     }
 
+    /// Writes many postings chunks in one transaction.
+    pub fn put_postings_chunks(&self, rows: &[(Vec<u8>, u16, Vec<u8>)]) -> RunResult<()> {
+        self.block_on(async {
+            let mut txn = self.pool().begin().await?;
+            for (term, chunk, body) in rows {
+                sqlx::query(
+                    "INSERT INTO postings (term, chunk, body) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(term, chunk) DO UPDATE SET body = excluded.body",
+                )
+                .bind(term.as_slice())
+                .bind(*chunk as i64)
+                .bind(body.as_slice())
+                .execute(&mut *txn)
+                .await?;
+            }
+            txn.commit().await?;
+            Ok(())
+        })
+    }
+
     /// One entry map row.
     pub fn entry_map(
         &self,

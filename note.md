@@ -685,15 +685,58 @@ and after.
 
 A/B on 200 books, after both fixes in this section and §3.0.4:
 
-| Mode | Both bugs | Fixed |
-|---|---|---|
-| `Full` | 269,4 s | **63,1 s** |
-| `TermsOnly` | 222,1 s | **36,4 s** |
-| `FileList` | — | **3,1 s** |
+| Mode | Both bugs | Both fixes | + map merge and batched writes |
+|---|---|---|---|
+| `Full` | 269,4 s | 63,1 s | **41,0 s** |
+| `TermsOnly` | 222,1 s | 36,4 s | **37,2 s** |
+| `FileList` | — | 3,1 s | **3,1 s** |
 
-4,3x for `Full`. Two wasteful second passes, not the decoders, were the cost —
-which is the same conclusion twice over: measure the parts before optimising any
-of them.
+6,6x for `Full` against the starting point. Two wasteful second passes, not the
+decoders, were the cost — which is the same conclusion twice over: measure the
+parts before optimising any of them.
+
+The 200-book index for `Full` is byte-identical before and after the last two
+changes (55 672 832 bytes), which is the check that the speedup came from
+removing work rather than from doing less of it.
+
+### 3.0.6 One map and one transaction
+
+After the two second-pass bugs, the phase report showed where the remaining time
+was, which is the only reason it could be targeted:
+
+| 100 books, `Full` | |
+|---|---|
+| decode | 3,2 s |
+| chunk encode | 3,7 s |
+| postings write | 0,9 s |
+| tokenize + index | **16,6 s** |
+
+The 16,6 s was the `add` call itself: three `BTreeMap` lookups keyed by the same
+term, once per posting. On 8,7 M postings that is 26 M lookups through a log-n
+tree, which is a cache-miss pattern rather than an arithmetic one. Merging the
+four term-keyed maps into one struct behind a single hash lookup, with a cheap
+non-cryptographic hash, took that to 10 s.
+
+Writing then took the remaining large share: one transaction per chunk. A chunk
+is ~600 bytes, so the library paid a commit per 600 bytes. Staging the chunks of
+one flush pass and committing them together took 3,3 s to 0,9 s.
+
+| 200 books | One chunk per transaction | Batched |
+|---|---|---|
+| `Full` | 63,1 s | **41,0 s** |
+| `TermsOnly` | 36,4 s | 37,2 s |
+
+`TermsOnly` does not gain because it has an order of magnitude fewer chunks; the
+cost it does have is the tokenizer itself, which is irreducible without changing
+what the index means.
+
+The `df` logic was rewritten to go with the merge, and the change broke
+`df_counts_documents_and_tf_counts_postings` — the new code only incremented
+`df` when moving *between* documents, never for the first, so two documents
+counted as one. The old code had the mirror of the same bug in the other
+direction: it treated the first document as a change from document zero, which
+was correct only because ids started at one. Both are now stated as what `df`
+means and the test says so too.
 
 ### 3.1 Scan (metadata only, does not open content)
 

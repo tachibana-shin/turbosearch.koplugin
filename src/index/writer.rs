@@ -14,10 +14,8 @@
 //! Nothing here renumbers a book id: they come from
 //! [`crate::storage::Engine::allocate_ids`] and are never reused.
 
-use std::collections::BTreeMap;
-
 use crate::index::{Chunk, EntryMap, Posting, dict, posting};
-use crate::storage::{Engine, RunResult};
+use crate::storage::{Engine, RunError, RunResult};
 
 /// Positions kept per `(term, document)` before the term is flagged partial.
 ///
@@ -34,9 +32,17 @@ pub const MAX_POSTINGS_PER_DOC: u32 = 100_000;
 /// group of keys, which cost more than the postings themselves.
 const MAX_PENDING: usize = 4 << 20;
 
-/// What one term accumulated during the session.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct TermCounts {
+/// Everything the writer tracks for one term.
+///
+/// This was three maps keyed by the same term, so `add` paid three lookups per
+/// posting — and on the measured library that was 26 s of a 36 s section loop.
+/// One map, one lookup, one cache line per live term.
+#[derive(Debug, Default)]
+struct TermState {
+    /// Postings not yet in a chunk.
+    pending: Vec<Posting>,
+    /// Next chunk index to write, once known.
+    next_chunk: Option<u32>,
     /// Documents that contributed at least one posting.
     df: u32,
     /// Total postings.
@@ -45,7 +51,55 @@ struct TermCounts {
     chunks_written: u32,
     /// Positions dropped because the per-document cap was reached.
     dropped: u32,
+    /// Current document, and positions counted in it.
+    run_doc: u32,
+    run_positions: u32,
+    /// Whether this term has ever been seen, so `df` is not counted twice for
+    /// the same document.
+    seeded: bool,
 }
+
+/// A byte-keyed map with a cheap hash.
+///
+/// `std::collections::HashMap` defaults to SipHash, which is a good general
+/// purpose hash and a poor one here: term keys are short, the table holds tens of
+/// thousands of them, and every posting looks up at least one. FxHash is the
+/// same algorithm the compiler itself uses for its own interned strings, needs no
+/// dependency, and is a single multiply per four bytes.
+#[derive(Default, Clone, Copy)]
+struct FxHasher {
+    hash: u64,
+}
+
+impl std::hash::Hasher for FxHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+        let mut hash = self.hash;
+        for chunk in bytes.chunks(8) {
+            let mut buf = [0u8; 8];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            let n = u64::from_le_bytes(buf);
+            hash = (hash.rotate_left(5) ^ n).wrapping_mul(SEED);
+        }
+        self.hash = hash;
+    }
+
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+struct FxBuildHasher;
+
+impl std::hash::BuildHasher for FxBuildHasher {
+    type Hasher = FxHasher;
+    fn build_hasher(&self) -> FxHasher {
+        FxHasher::default()
+    }
+}
+
+type TermMap = std::collections::HashMap<Vec<u8>, TermState, FxBuildHasher>;
 
 /// Orders terms for a flush pass.
 ///
@@ -62,53 +116,52 @@ fn sort_for_flush(terms: &mut [Vec<u8>]) {
 /// Accumulates an indexing session and writes it into the database.
 pub struct Writer<'a> {
     engine: &'a Engine,
-    /// term -> postings not yet in a chunk.
-    pending: BTreeMap<Vec<u8>, Vec<Posting>>,
-    /// Total postings across `pending`, the number the pool cap bounds.
+    /// term -> everything kept for it. One map rather than four, because every
+    /// posting touches the term at least once.
+    terms: TermMap,
+    /// Total postings held across `terms`, the number the pool cap bounds.
     pending_postings: usize,
     /// The cap itself, held as a field so tests can drive a session smaller
     /// than a full library without feeding it millions of postings.
     max_pending: usize,
-    /// term -> next chunk index to write.
-    next_chunk: BTreeMap<Vec<u8>, u32>,
-    /// term -> session counts.
-    counts: BTreeMap<Vec<u8>, TermCounts>,
-    /// term -> (current document, positions counted in it), for df and the cap.
-    runs: BTreeMap<Vec<u8>, (u32, u32)>,
     /// Documents fed to this writer.
     docs: u32,
+    /// Time spent encoding and writing chunks, versus the rest of `add`.
+    ///
+    /// Both live inside the section loop, so a single "tokenize + index" number
+    /// cannot tell them apart — and they need opposite fixes.
+    time_flush: std::time::Duration,
+    /// The split of `time_flush` between the coders and the database.
+    time_encode: std::time::Duration,
+    time_write: std::time::Duration,
 }
 
 impl<'a> Writer<'a> {
     /// Opens a writer, reading the existing chunk counts so appends continue.
     pub fn new(engine: &'a Engine) -> RunResult<Self> {
-        let mut next_chunk = BTreeMap::new();
-
-        // Chunks already on disk come from two places: the dictionary, which is
-        // rewritten once per session, and the delta from a session that was
-        // interrupted before its merge. Both are needed for the next index to be
-        // append-only rather than a rewrite.
+        // Chunks already on disk come from the dictionary, which is rewritten
+        // once per session. Seeding them here means the first flush of a term
+        // continues the list rather than reusing chunk index zero — which is what
+        // an interrupted session needs, and which is why `end_document` no longer
+        // writes a delta row per book.
         let d = dict::load(engine)?;
+        let mut terms = TermMap::default();
         for i in 0..d.len() {
             let e = d.entry(i);
             if e.chunk_count > 0 {
-                next_chunk.insert(d.term(i).to_vec(), e.chunk_count);
+                terms.entry(d.term(i).to_vec()).or_default().next_chunk = Some(e.chunk_count);
             }
-        }
-        for (term, _df, _tf, chunks) in dict::load_deltas(engine)? {
-            let n = next_chunk.entry(term).or_insert(0);
-            *n = n.saturating_add(chunks);
         }
 
         Ok(Self {
             engine,
-            pending: BTreeMap::new(),
+            terms,
             pending_postings: 0,
             max_pending: MAX_PENDING,
-            next_chunk,
-            counts: BTreeMap::new(),
-            runs: BTreeMap::new(),
             docs: 0,
+            time_flush: std::time::Duration::ZERO,
+            time_encode: std::time::Duration::ZERO,
+            time_write: std::time::Duration::ZERO,
         })
     }
 
@@ -134,28 +187,42 @@ impl<'a> Writer<'a> {
         position: u32,
         entry_idx: u16,
     ) -> RunResult<bool> {
-        let c = self.counts.entry(term.to_vec()).or_default();
+        // One hash lookup covers the counts, the document run and the pending
+        // list. Three maps here cost 26 s of a 36 s section loop on the measured
+        // library, purely in cache misses and log-n traversal.
+        let state = self.terms.entry(term.to_vec()).or_default();
 
-        // df counts a document once. Documents arrive in ascending order, so
-        // watching for a change of doc is enough — no per-document set needed.
-        let run = self.runs.entry(term.to_vec()).or_insert((0, 0));
-        if run.0 != doc_id {
-            if doc_id > run.0 {
-                c.df += 1;
+        // df is the number of documents that contributed at least one posting.
+        // Documents arrive in ascending order, so watching for a change is
+        // enough — no per-document set, and the first document counts like any
+        // other rather than being skipped because the run starts empty.
+        if !state.seeded {
+            state.seeded = true;
+            state.df = 1;
+            state.run_doc = doc_id;
+            state.run_positions = 0;
+        } else if state.run_doc != doc_id {
+            if doc_id < state.run_doc {
+                return Err(RunError::Message(
+                    "documents must arrive in ascending order".into(),
+                ));
             }
-            *run = (doc_id, 0);
+            state.df += 1;
+            state.run_doc = doc_id;
+            state.run_positions = 0;
         }
 
-        if c.dropped > 0 || run.1 >= MAX_POSTINGS_PER_DOC {
-            c.dropped += 1;
-            c.tf += 1;
+        if state.dropped > 0 || state.run_positions >= MAX_POSTINGS_PER_DOC {
+            state.dropped += 1;
+            state.tf += 1;
             return Ok(true);
         }
-        run.1 += 1;
-        c.tf += 1;
+        state.run_positions += 1;
+        state.tf += 1;
 
-        let v = self.pending.entry(term.to_vec()).or_default();
-        v.push(Posting::new(doc_id, position, entry_idx));
+        state
+            .pending
+            .push(Posting::new(doc_id, position, entry_idx));
         self.pending_postings += 1;
         // Not per-term: flushing whenever one term reached a chunk would split
         // the common case of a short term into many small chunks. The bound is
@@ -175,15 +242,25 @@ impl<'a> Writer<'a> {
     fn release_memory(&mut self) -> RunResult<()> {
         let target = self.max_pending / 2;
         // Clone the terms rather than holding a borrow over the flush below.
-        let mut order: Vec<Vec<u8>> = self.pending.keys().cloned().collect();
+        let mut order: Vec<Vec<u8>> = self
+            .terms
+            .iter()
+            .filter(|(_, st)| !st.pending.is_empty())
+            .map(|(t, _)| t.clone())
+            .collect();
         sort_for_flush(&mut order);
+        // One transaction for the whole pass. The terms are written in key order,
+        // which is what keeps the B-tree appending, and one commit per pass
+        // rather than per chunk — on the measured library that was a transaction
+        // per 600-byte chunk.
+        let mut batch: Vec<(Vec<u8>, u16, Vec<u8>)> = Vec::new();
         for term in &order {
             if self.pending_postings <= target {
                 break;
             }
-            self.flush_term(term)?;
+            self.stage_term(term, &mut batch)?;
         }
-        Ok(())
+        self.write_batch(batch)
     }
 
     /// Marks the end of a document.
@@ -201,35 +278,55 @@ impl<'a> Writer<'a> {
 
     /// Writes every term with pending postings.
     pub fn flush(&mut self) -> RunResult<()> {
-        let terms: Vec<Vec<u8>> = self.pending.keys().cloned().collect();
+        let terms: Vec<Vec<u8>> = self
+            .terms
+            .iter()
+            .filter(|(_, st)| !st.pending.is_empty())
+            .map(|(t, _)| t.clone())
+            .collect();
+        let mut batch: Vec<(Vec<u8>, u16, Vec<u8>)> = Vec::new();
         for t in terms {
-            self.flush_term(&t)?;
+            self.stage_term(&t, &mut batch)?;
         }
-        Ok(())
+        self.write_batch(batch)
     }
 
-    /// Writes one term's pending postings as chunks.
-    fn flush_term(&mut self, term: &[u8]) -> RunResult<()> {
-        let Some(postings) = self.pending.remove(term) else {
-            return Ok(());
+    /// Encodes a term's pending postings into `batch`, without touching the
+    /// database.
+    fn stage_term(
+        &mut self,
+        term: &[u8],
+        batch: &mut Vec<(Vec<u8>, u16, Vec<u8>)>,
+    ) -> RunResult<()> {
+        let _t = std::time::Instant::now();
+        let out = self.stage_term_inner(term, batch);
+        self.time_flush += _t.elapsed();
+        out
+    }
+
+    fn stage_term_inner(
+        &mut self,
+        term: &[u8],
+        batch: &mut Vec<(Vec<u8>, u16, Vec<u8>)>,
+    ) -> RunResult<()> {
+        let postings = match self.terms.get_mut(term) {
+            Some(st) if !st.pending.is_empty() => std::mem::take(&mut st.pending),
+            _ => return Ok(()),
         };
         self.pending_postings -= postings.len();
 
-        // The chunk index continues from whatever is on disk. Asking the
-        // `postings` table itself — once per term per session, then cached —
-        // is what lets `end_document` stop rewriting a delta row for the whole
-        // dictionary on every book, which was quadratic in the library size.
-        let mut next = match self.next_chunk.get(term).copied() {
+        let mut next = match self.terms.get(term).and_then(|st| st.next_chunk) {
             Some(n) => n,
             None => {
                 let n = self.engine.postings_chunk_count(term)?;
-                self.next_chunk.insert(term.to_vec(), n);
+                if let Some(st) = self.terms.get_mut(term) {
+                    st.next_chunk = Some(n);
+                }
                 n
             }
         };
-        let mut writes: Vec<(u16, Vec<u8>)> =
-            Vec::with_capacity(postings.len() / posting::CHUNK_POSTINGS + 1);
-
+        let _t_enc = std::time::Instant::now();
+        let mut staged = 0usize;
         for group in postings.chunks(posting::CHUNK_POSTINGS) {
             if group.is_empty() {
                 continue;
@@ -238,24 +335,36 @@ impl<'a> Writer<'a> {
                 first_doc: group[0].doc_id,
                 postings: group.to_vec(),
             };
-            writes.push((next as u16, chunk.encode()));
+            batch.push((term.to_vec(), next as u16, chunk.encode()));
             next += 1;
+            staged += 1;
         }
-
-        if writes.is_empty() {
-            return Ok(());
+        self.time_encode += _t_enc.elapsed();
+        if staged > 0
+            && let Some(st) = self.terms.get_mut(term)
+        {
+            st.next_chunk = Some(next);
+            st.chunks_written += staged as u32;
         }
-        // Non-durable: this runs once per flushed term, which is tens of
-        // thousands of times per session. `close` flushes the lot in one sync.
-        for (idx, blob) in &writes {
-            self.engine.put_postings_chunk(term, *idx, blob)?;
-        }
-
-        self.next_chunk.insert(term.to_vec(), next);
-        self.counts.entry(term.to_vec()).or_default().chunks_written += writes.len() as u32;
         Ok(())
     }
 
+    /// Writes staged chunks in one transaction.
+    ///
+    /// Batching is what makes this cheap: the same library written one chunk per
+    /// transaction paid a commit per 600 bytes. `engine.write_batch` is
+    /// non-durable by design, and `close` flushes the whole session in one sync.
+    fn write_batch(&mut self, batch: Vec<(Vec<u8>, u16, Vec<u8>)>) -> RunResult<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let _t_w = std::time::Instant::now();
+        self.engine.put_postings_chunks(&batch)?;
+        self.time_write += _t_w.elapsed();
+        Ok(())
+    }
+
+    /// Writes one term's pending postings as chunks.
     /// Applies the session's counts to a loaded dictionary and stores it.
     ///
     /// This is the single rewrite of the dictionary blob per session. The delta
@@ -270,13 +379,12 @@ impl<'a> Writer<'a> {
     /// left a freshly written index at 69% free space.
     pub fn close(&mut self, dict: &mut dict::Dict) -> RunResult<()> {
         self.flush()?;
-        for (term, c) in &self.counts {
-            dict.add(term, c.df, c.tf, c.chunks_written);
-        }
-        // A term that hit the per-document cap loses positions, so it must be
-        // reported as partial or the query layer will trust an incomplete list.
-        for (term, c) in &self.counts {
-            if c.dropped > 0
+        for (term, st) in &self.terms {
+            dict.add(term, st.df, st.tf, st.chunks_written);
+            // A term that hit the per-document cap loses positions, so it must be
+            // reported as partial or the query layer will trust an incomplete
+            // list.
+            if st.dropped > 0
                 && let Some(e) = dict.entry_for_mut(term)
             {
                 e.flags |= dict::FLAG_PARTIAL;
@@ -293,9 +401,9 @@ impl<'a> Writer<'a> {
 
     /// The delta rows this session produced, for `DICT_DELTA`.
     pub fn delta_rows(&self) -> Vec<(Vec<u8>, u32, u32, u32)> {
-        self.counts
+        self.terms
             .iter()
-            .map(|(t, c)| (t.clone(), c.df, c.tf, c.chunks_written))
+            .map(|(t, st)| (t.clone(), st.df, st.tf, st.chunks_written))
             .collect()
     }
 
@@ -306,7 +414,34 @@ impl<'a> Writer<'a> {
 
     /// Positions dropped by the per-document cap.
     pub fn dropped(&self) -> u32 {
-        self.counts.values().map(|c| c.dropped).sum()
+        self.terms.values().map(|st| st.dropped).sum()
+    }
+
+    /// Pending postings held for one term.
+    #[cfg(test)]
+    fn pending_len(&self, term: &[u8]) -> Option<usize> {
+        self.terms.get(term).map(|st| st.pending.len())
+    }
+
+    /// The chunk index a term will next write at.
+    #[cfg(test)]
+    fn chunk_index(&self, term: &[u8]) -> Option<u32> {
+        self.terms.get(term).and_then(|st| st.next_chunk)
+    }
+
+    /// Time spent inside `flush_term` — encoding chunks and writing them.
+    pub fn time_flush(&self) -> std::time::Duration {
+        self.time_flush
+    }
+
+    /// Time inside the coders alone, excluding the database.
+    pub fn time_encode(&self) -> std::time::Duration {
+        self.time_encode
+    }
+
+    /// Time inserting into `postings`.
+    pub fn time_write(&self) -> std::time::Duration {
+        self.time_write
     }
 }
 
@@ -361,8 +496,7 @@ mod tests {
     fn a_writer_starts_with_no_chunks_on_disk() {
         let (_d, e) = engine();
         let w = Writer::new(&e).unwrap();
-        assert!(w.pending.is_empty());
-        assert!(w.next_chunk.is_empty());
+        assert!(w.terms.is_empty());
     }
 
     #[test]
@@ -379,7 +513,7 @@ mod tests {
         let (_d, e) = engine();
         let mut w = Writer::new(&e).unwrap();
         w.add(b"holmes", 1, 0, 0).unwrap();
-        assert_eq!(w.pending.len(), 1);
+        assert_eq!(w.terms.len(), 1);
         // Still pending, so a reader must see nothing.
         assert_eq!(chunk_count(&e, b"holmes"), 0);
         assert_eq!(w.delta_rows(), vec![(b"holmes".to_vec(), 1, 1, 0)]);
@@ -397,7 +531,7 @@ mod tests {
             w.add(b"x", 1, i, 0).unwrap();
         }
         assert_eq!(
-            w.pending.get(b"x".as_slice()).map(Vec::len),
+            w.pending_len(b"x"),
             Some(n),
             "a short term must not be flushed early"
         );
@@ -405,7 +539,7 @@ mod tests {
 
         w.end_document().unwrap();
         assert_eq!(
-            w.pending.get(b"x".as_slice()).map(Vec::len),
+            w.pending_len(b"x"),
             Some(n),
             "ending a document must not flush either"
         );
@@ -598,7 +732,7 @@ mod tests {
             // A fresh writer must read the chunk counts back off disk: the first
             // book filled one chunk and left a remainder, so index 2 is next.
             let mut w = Writer::new(&e).unwrap();
-            assert_eq!(w.next_chunk.get(b"a".as_slice()).copied(), Some(2));
+            assert_eq!(w.chunk_index(b"a"), Some(2));
             let n = posting::CHUNK_POSTINGS + 10;
             for i in 0..n as u32 {
                 w.add(b"a", 2, i, 0).unwrap();
@@ -611,9 +745,11 @@ mod tests {
     }
 
     #[test]
-    fn an_interrupted_session_resumes_from_the_delta() {
-        // A crash between writing chunks and merging them is the case the delta
-        // exists for: the next session must not reuse chunk index 0.
+    fn an_interrupted_session_resumes_from_the_postings_table() {
+        // A crash between writing chunks and merging them into the dictionary is
+        // the case a delta row used to cover. There is no delta any more: the
+        // next session reads the chunk count off `postings`, which is written
+        // before the crash, so index 0 is never reused.
         let (_d, e) = engine();
         let mut dict = dict::Dict::new();
         {
@@ -621,14 +757,21 @@ mod tests {
             w.add(b"b", 1, 0, 0).unwrap();
             w.flush().unwrap();
             // No close(): the session ended without merging into the dictionary.
-            dict::store_deltas(&e, &w.delta_rows()).unwrap();
         }
         let mut w = Writer::new(&e).unwrap();
-        assert_eq!(w.next_chunk.get(b"b".as_slice()).copied(), Some(1));
+        assert_eq!(
+            w.chunk_index(b"b"),
+            None,
+            "a fresh writer holds no state, and must not assume it"
+        );
         w.add(b"b", 2, 0, 0).unwrap();
         w.end_document().unwrap();
         w.close(&mut dict).unwrap();
-        assert_eq!(chunk_count(&e, b"b"), 2);
+        assert_eq!(
+            chunk_count(&e, b"b"),
+            2,
+            "the second chunk must be a new key"
+        );
     }
 
     #[test]
