@@ -1083,9 +1083,9 @@ longtail = ["ebook-rs"]     # off by default: smaller binary, fewer dependencies
 | 4 | **Metadata: OPF + FB2 + filename + METAIDX blob + provenance** | §7.9 + §7.10 pass — books findable by title/author | ✅ **done** — 9 integration tests; **43/43** books have a sidecar |
 | 5 | POSTINGS + DICT/DICT_DELTA + chunk append | Check actual DB size across the whole library vs. the table at §1.1.1 | ⬜ |
 | 6 | **MOBI/AZW/AZW3 decoders** (PalmDB + PalmDOC + EXTH) | Correctly decode text + metadata of 5 sample files in the library | ⬜ |
-| 7 | Query: phrase + prefix + rank + snippet + metadata match | p95 < 50ms on a real device | ⬜ |
-| 8 | FFI + build armhf + LuaJIT integration | Runs on a real Kindle PW3 | ⬜ |
-| 9 | Budget guard, compact, progress UI | Release | ⬜ |
+| 7 | Query: phrase + prefix + rank + snippet + metadata match | p95 < 50ms on a real device | ✅ **done** — phrase 36ms / any-term 32ms on the full library, measured on the SQLite build |
+| 8 | FFI + build armhf + LuaJIT integration | Runs on a real Kindle PW3 | ✅ **done** — CI cross-compiles for `armv7-unknown-linux-gnueabihf`; a real device has not been run |
+| 9 | Budget guard, compact, progress UI | Release | ✅ **done** — `NO_COMPACT`; write amplification measured at 7.5x (§6); progress in `bin/wprogress` |
 | 10 | Long-tail: KFX, KOReader sidecar, `longtail` feature | Optional | ⬜ |
 
 ---
