@@ -1,17 +1,13 @@
-/target
-
-# Built index databases (large, machine-specific)
-*.idx
-*.redb
-.indexer.log
-.breakdown.log
-# Build artifacts: the compile-time DB sqlx macros verify against,
-# and the SQLite sidecar files of any built index.
-.env
-.sqlx-dev.db
-*.idx-shm
-*.idx-wal
-*.idx
+# Build artifacts: the engine library and the Lua compiled from Teal live in
+# the plugin directory beside the source, and are produced by script/build-plugin.
+plugin/turbosearch.koplugin/*.so
+plugin/turbosearch.koplugin/**/*.so
+plugin/turbosearch.koplugin/turbosearch.lua
 
 # Teal: the compiled Lua is a build artifact, the .tl source is not.
 tl/*.lua
+
+# Indexing scratch
+*.idx
+*.idx-wal
+*.idx-shm

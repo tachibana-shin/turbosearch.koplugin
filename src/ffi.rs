@@ -102,11 +102,13 @@ pub extern "C" fn ts_alloc_buffer(len: usize) -> *mut c_char {
 /// functions. Passing null is allowed and does nothing.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_free(ptr: *mut c_char) {
-    if ptr.is_null() {
-        return;
+    unsafe {
+        if ptr.is_null() {
+            return;
+        }
+        let len = std::ffi::CStr::from_ptr(ptr).to_bytes().len();
+        drop(Vec::from_raw_parts(ptr as *mut u8, len, len + 1));
     }
-    let len = std::ffi::CStr::from_ptr(ptr).to_bytes().len();
-    drop(Vec::from_raw_parts(ptr as *mut u8, len, len + 1));
 }
 
 /// The last error message, or null when the previous call succeeded.
@@ -144,39 +146,41 @@ pub extern "C" fn ts_version() -> *const c_char {
 /// `db_path` must be a null-terminated UTF-8 path, or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_open(db_path: *const c_char) -> *mut TsIndex {
-    let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        let path = match to_str(db_path) {
-            Some(p) if !p.is_empty() => p.to_string(),
-            _ => {
-                set_error("ts_open: db_path is null or empty");
-                return std::ptr::null_mut();
+    unsafe {
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            let path = match to_str(db_path) {
+                Some(p) if !p.is_empty() => p.to_string(),
+                _ => {
+                    set_error("ts_open: db_path is null or empty");
+                    return std::ptr::null_mut();
+                }
+            };
+            match crate::storage::Engine::open(Path::new(&path)) {
+                Ok(engine) => {
+                    let engine: &'static mut crate::storage::Engine = Box::leak(Box::new(engine));
+                    let engine: &'static crate::storage::Engine = engine;
+                    let d = match dict::load(engine) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            set_error(&format!("ts_open: {path}: {e}"));
+                            return std::ptr::null_mut();
+                        }
+                    };
+                    clear_error();
+                    Box::into_raw(Box::new(TsIndex { engine, dict: d }))
+                }
+                Err(e) => {
+                    set_error(&format!("ts_open: {path}: {e}"));
+                    std::ptr::null_mut()
+                }
             }
-        };
-        match crate::storage::Engine::open(Path::new(&path)) {
-            Ok(engine) => {
-                let engine: &'static mut crate::storage::Engine = Box::leak(Box::new(engine));
-                let engine: &'static crate::storage::Engine = engine;
-                let d = match dict::load(engine) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        set_error(&format!("ts_open: {path}: {e}"));
-                        return std::ptr::null_mut();
-                    }
-                };
-                clear_error();
-                Box::into_raw(Box::new(TsIndex { engine, dict: d }))
-            }
-            Err(e) => {
-                set_error(&format!("ts_open: {path}: {e}"));
+        }));
+        match result {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                set_error("ts_open: panicked");
                 std::ptr::null_mut()
             }
-        }
-    }));
-    match result {
-        Ok(ptr) => ptr,
-        Err(_) => {
-            set_error("ts_open: panicked");
-            std::ptr::null_mut()
         }
     }
 }
@@ -188,31 +192,38 @@ pub unsafe extern "C" fn ts_open(db_path: *const c_char) -> *mut TsIndex {
 /// afterwards.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_close(handle: *mut TsIndex) {
-    if handle.is_null() {
-        return;
+    unsafe {
+        if handle.is_null() {
+            return;
+        }
+        let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+            let boxed = Box::from_raw(handle);
+            // The engine was leaked in ts_open so the handle could hold a reference
+            // to it; this is where that ends.
+            drop(boxed);
+        }));
     }
-    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
-        let boxed = Box::from_raw(handle);
-        // The engine was leaked in ts_open so the handle could hold a reference
-        // to it; this is where that ends.
-        drop(boxed);
-    }));
 }
 
 /// How much content the index holds: 0 `Full`, 1 `TermsOnly`, 2 `FileList`.
 ///
 /// A caller that needs phrase queries can check this and warn, rather than
 /// returning a phrase result that cannot exist.
+///
+/// # Safety
+/// `handle` must be non-null and come from [`ts_open`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_content_mode(handle: *mut TsIndex) -> c_int {
-    let Some(handle) = as_ref(handle) else {
-        return TS_ERR_ARGUMENT;
-    };
-    match handle.engine.config() {
-        Ok(c) => c.content_mode as c_int,
-        Err(e) => {
-            set_error(&format!("ts_content_mode: {e}"));
-            TS_ERR_QUERY
+    unsafe {
+        let Some(handle) = as_ref(handle) else {
+            return TS_ERR_ARGUMENT;
+        };
+        match handle.engine.config() {
+            Ok(c) => c.content_mode as c_int,
+            Err(e) => {
+                set_error(&format!("ts_content_mode: {e}"));
+                TS_ERR_QUERY
+            }
         }
     }
 }
@@ -231,23 +242,25 @@ pub unsafe extern "C" fn ts_search(
     query: *const c_char,
     out_count: *mut c_int,
 ) -> *mut c_char {
-    let Some(handle) = as_ref(handle) else {
-        return err_ret("ts_search: null handle", out_count);
-    };
-    let Some(q) = to_str(query) else {
-        return err_ret("ts_search: null or empty query", out_count);
-    };
+    unsafe {
+        let Some(handle) = as_ref(handle) else {
+            return err_ret("ts_search: null handle", out_count);
+        };
+        let Some(q) = to_str(query) else {
+            return err_ret("ts_search: null or empty query", out_count);
+        };
 
-    match panic::catch_unwind(AssertUnwindSafe(|| search_impl(handle, q))) {
-        Ok(Ok((buffer, count))) => {
-            clear_error();
-            if !out_count.is_null() {
-                *out_count = count;
+        match panic::catch_unwind(AssertUnwindSafe(|| search_impl(handle, q))) {
+            Ok(Ok((buffer, count))) => {
+                clear_error();
+                if !out_count.is_null() {
+                    *out_count = count;
+                }
+                buffer
             }
-            buffer
+            Ok(Err(e)) => err_ret(&format!("ts_search: {e}"), out_count),
+            Err(_) => err_ret("ts_search: panicked", out_count),
         }
-        Ok(Err(e)) => unsafe { err_ret(&format!("ts_search: {e}"), out_count) },
-        Err(_) => unsafe { err_ret("ts_search: panicked", out_count) },
     }
 }
 
@@ -259,11 +272,13 @@ fn search_impl(handle: &TsIndex, query: &str) -> crate::storage::RunResult<(*mut
 
 /// Writes a results buffer and reports the count.
 unsafe fn err_ret(msg: &str, out_count: *mut c_int) -> *mut c_char {
-    set_error(msg);
-    if !out_count.is_null() {
-        *out_count = 0;
+    unsafe {
+        set_error(msg);
+        if !out_count.is_null() {
+            *out_count = 0;
+        }
+        std::ptr::null_mut()
     }
-    std::ptr::null_mut()
 }
 
 /// Searches metadata: title, author, series and description.
@@ -278,31 +293,33 @@ pub unsafe extern "C" fn ts_search_meta(
     query: *const c_char,
     out_count: *mut c_int,
 ) -> *mut c_char {
-    let Some(handle) = as_ref(handle) else {
-        return err_ret("ts_search_meta: null handle", out_count);
-    };
-    let Some(q) = to_str(query) else {
-        return err_ret("ts_search_meta: null or empty query", out_count);
-    };
+    unsafe {
+        let Some(handle) = as_ref(handle) else {
+            return err_ret("ts_search_meta: null handle", out_count);
+        };
+        let Some(q) = to_str(query) else {
+            return err_ret("ts_search_meta: null or empty query", out_count);
+        };
 
-    match panic::catch_unwind(AssertUnwindSafe(|| metadata::search(handle.engine, q))) {
-        Ok(Ok(rows)) => {
-            clear_error();
-            let mut body = String::new();
-            for (id, title) in &rows {
-                body.push_str(&format!("{id}\t{title}\n"));
+        match panic::catch_unwind(AssertUnwindSafe(|| metadata::search(handle.engine, q))) {
+            Ok(Ok(rows)) => {
+                clear_error();
+                let mut body = String::new();
+                for (id, title) in &rows {
+                    body.push_str(&format!("{id}\t{title}\n"));
+                }
+                if !out_count.is_null() {
+                    *out_count = rows.len() as c_int;
+                }
+                if rows.is_empty() {
+                    // An empty result is a valid empty buffer, not a failure.
+                    return to_c_string("");
+                }
+                to_c_string(&body)
             }
-            if !out_count.is_null() {
-                *out_count = rows.len() as c_int;
-            }
-            if rows.is_empty() {
-                // An empty result is a valid empty buffer, not a failure.
-                return to_c_string("");
-            }
-            to_c_string(&body)
+            Ok(Err(e)) => err_ret(&format!("ts_search_meta: {e}"), out_count),
+            Err(_) => err_ret("ts_search_meta: panicked", out_count),
         }
-        Ok(Err(e)) => unsafe { err_ret(&format!("ts_search_meta: {e}"), out_count) },
-        Err(_) => unsafe { err_ret("ts_search_meta: panicked", out_count) },
     }
 }
 
@@ -314,24 +331,23 @@ pub unsafe extern "C" fn ts_search_meta(
 /// # Safety
 /// As [`ts_search`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ts_book_title(
-    handle: *mut TsIndex,
-    book_id: c_int,
-) -> *mut c_char {
-    let Some(handle) = as_ref(handle) else {
-        set_error("ts_book_title: null handle");
-        return std::ptr::null_mut();
-    };
-    if book_id < 0 || book_id > u16::MAX as c_int {
-        set_error("ts_book_title: book id out of range");
-        return std::ptr::null_mut();
-    }
-    match handle.engine.metadata(book_id as u16) {
-        Ok(Some(record)) => to_c_string(&record.title),
-        Ok(None) => std::ptr::null_mut(),
-        Err(e) => {
-            set_error(&format!("ts_book_title: {e}"));
-            std::ptr::null_mut()
+pub unsafe extern "C" fn ts_book_title(handle: *mut TsIndex, book_id: c_int) -> *mut c_char {
+    unsafe {
+        let Some(handle) = as_ref(handle) else {
+            set_error("ts_book_title: null handle");
+            return std::ptr::null_mut();
+        };
+        if book_id < 0 || book_id > u16::MAX as c_int {
+            set_error("ts_book_title: book id out of range");
+            return std::ptr::null_mut();
+        }
+        match handle.engine.metadata(book_id as u16) {
+            Ok(Some(record)) => to_c_string(&record.title),
+            Ok(None) => std::ptr::null_mut(),
+            Err(e) => {
+                set_error(&format!("ts_book_title: {e}"));
+                std::ptr::null_mut()
+            }
         }
     }
 }
@@ -341,24 +357,23 @@ pub unsafe extern "C" fn ts_book_title(
 /// # Safety
 /// As [`ts_search`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ts_book_path(
-    handle: *mut TsIndex,
-    book_id: c_int,
-) -> *mut c_char {
-    let Some(handle) = as_ref(handle) else {
-        set_error("ts_book_path: null handle");
-        return std::ptr::null_mut();
-    };
-    if book_id < 0 || book_id > u16::MAX as c_int {
-        set_error("ts_book_path: book id out of range");
-        return std::ptr::null_mut();
-    }
-    match handle.engine.book(book_id as u16) {
-        Ok(Some(book)) => to_c_string(&book.path),
-        Ok(None) => std::ptr::null_mut(),
-        Err(e) => {
-            set_error(&format!("ts_book_path: {e}"));
-            std::ptr::null_mut()
+pub unsafe extern "C" fn ts_book_path(handle: *mut TsIndex, book_id: c_int) -> *mut c_char {
+    unsafe {
+        let Some(handle) = as_ref(handle) else {
+            set_error("ts_book_path: null handle");
+            return std::ptr::null_mut();
+        };
+        if book_id < 0 || book_id > u16::MAX as c_int {
+            set_error("ts_book_path: book id out of range");
+            return std::ptr::null_mut();
+        }
+        match handle.engine.book(book_id as u16) {
+            Ok(Some(book)) => to_c_string(&book.path),
+            Ok(None) => std::ptr::null_mut(),
+            Err(e) => {
+                set_error(&format!("ts_book_path: {e}"));
+                std::ptr::null_mut()
+            }
         }
     }
 }
@@ -367,19 +382,23 @@ pub unsafe extern "C" fn ts_book_path(
 
 /// Borrows a handle, or null-checks it.
 unsafe fn as_ref<'b>(handle: *mut TsIndex) -> Option<&'b TsIndex> {
-    if handle.is_null() {
-        None
-    } else {
-        Some(&*(handle as *const TsIndex))
+    unsafe {
+        if handle.is_null() {
+            None
+        } else {
+            Some(&*(handle as *const TsIndex))
+        }
     }
 }
 
 /// Borrows a C string as Rust text.
 unsafe fn to_str<'b>(ptr: *const c_char) -> Option<&'b str> {
-    if ptr.is_null() {
-        return None;
+    unsafe {
+        if ptr.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(ptr).to_str().ok()
     }
-    std::ffi::CStr::from_ptr(ptr).to_str().ok()
 }
 
 /// Copies `text` into a fresh buffer.
@@ -392,27 +411,13 @@ fn to_c_string(text: &str) -> *mut c_char {
     raw as *mut c_char
 }
 
-/// Writes `text` into a buffer already sized for it.
-unsafe fn write_into(buffer: *mut c_char, text: &str) -> *mut c_char {
-    let bytes = text.as_bytes();
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer as *mut u8, bytes.len());
-    *(buffer as *mut u8).add(bytes.len()) = 0;
-    buffer
-}
-
 /// Builds a buffer of `"<id> <score>\n"` lines.
 fn lines_buffer(rows: impl Iterator<Item = (u32, u32)>) -> *mut c_char {
     let mut body = String::new();
     for (id, score) in rows {
         body.push_str(&format!("{id} {score}\n"));
     }
-    let raw = to_c_string(&body);
-    raw
-}
-
-/// Frees an error message.
-unsafe fn free_message(ptr: *mut c_char) {
-    ts_free(ptr);
+    to_c_string(&body)
 }
 
 #[cfg(test)]
@@ -489,17 +494,6 @@ mod tests {
     }
 
     #[test]
-    fn write_into_stays_inside_the_buffer() {
-        let text = "12 bytes!!!";
-        let buf = ts_alloc_buffer(text.len());
-        let filled = unsafe { write_into(buf, text) };
-        assert_eq!(filled, buf);
-        let back = unsafe { std::ffi::CStr::from_ptr(buf) }.to_str().unwrap();
-        assert_eq!(back, text);
-        unsafe { ts_free(buf) };
-    }
-
-    #[test]
     fn lines_buffer_formats_one_line_per_result() {
         let buf = lines_buffer([(7u32, 12u32), (9u32, 3u32)].into_iter());
         let back = unsafe { std::ffi::CStr::from_ptr(buf) }.to_str().unwrap();
@@ -523,10 +517,15 @@ mod tests {
     fn a_null_handle_is_refused_by_every_entry_point() {
         let mut count = 7i32;
         assert!(unsafe { ts_search(std::ptr::null_mut(), std::ptr::null(), &mut count) }.is_null());
-        assert!(unsafe { ts_search_meta(std::ptr::null_mut(), std::ptr::null(), &mut count) }.is_null());
+        assert!(
+            unsafe { ts_search_meta(std::ptr::null_mut(), std::ptr::null(), &mut count) }.is_null()
+        );
         assert!(unsafe { ts_book_title(std::ptr::null_mut(), 0) }.is_null());
         assert!(unsafe { ts_book_path(std::ptr::null_mut(), 0) }.is_null());
-        assert_eq!(unsafe { ts_content_mode(std::ptr::null_mut()) }, TS_ERR_ARGUMENT);
+        assert_eq!(
+            unsafe { ts_content_mode(std::ptr::null_mut()) },
+            TS_ERR_ARGUMENT
+        );
         assert_eq!(count, 0);
     }
 

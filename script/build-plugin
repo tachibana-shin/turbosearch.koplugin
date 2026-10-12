@@ -1,0 +1,22 @@
+#!/bin/bash
+# Assembles the plugin: the engine library and the compiled Lua beside the Lua
+# that defines the plugin, in one directory.
+#
+# Builds for the host by default, which is the machine with the KOReader
+# desktop reader on it and the only place the plugin can be tried without a
+# device.
+#
+# The artifacts are not committed. A 4 MB .so and a generated Lua file in git
+# would also mean the repository outlived the target it was built for, and this
+# builds both in one step anyway.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+PLUGIN="plugin/turbosearch.koplugin"
+LIB="libturbosearch.so"
+
+cargo build --release
+cp "target/release/$LIB" "$PLUGIN/$LIB"
+./script/lua-build
+
+echo "built $PLUGIN"

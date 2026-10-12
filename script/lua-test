@@ -1,0 +1,18 @@
+#!/bin/bash
+# Runs the plugin smoke test: the real main.lua against stubbed KOReader modules.
+#
+# Expects a built index to point at, because the point of the test is the plugin
+# path end to end — engine, binding, search, rows — rather than the engine's own
+# behaviour, which the Rust suite already covers.
+#
+# Usage: script/lua-test [index]
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# The plugin loads the engine from its own directory.
+if [ ! -f plugin/turbosearch.koplugin/libturbosearch.so ]; then
+    cp target/release/libturbosearch.so plugin/turbosearch.koplugin/
+fi
+
+export TS_TEST_INDEX="${1:-/tmp/opencode/e2e.idx}"
+luajit tests/plugin_smoke.lua
