@@ -284,16 +284,19 @@ end
 
 --- Shows the empty state on the menu rather than in a dialog, so the reader
 --- can start the next query from where the list would have been.
+-- Shows the empty state on the menu rather than in a dialog, so the reader
+-- starts the next query from where the list would have been.
+--
+-- The single row is there because an empty item_table renders a blank list and
+-- no explanation: Menu would show the title and nothing else, and a reader who
+-- typed a query is owed to know it ran. There is no `dimmed` to grey it out
+-- with on this KOReader version, so the text says it instead.
 function Turbosearch:showEmpty(query)
     self.result_menu = Menu:new{
         title = _("Search results"),
-        subtitle = T(_("“%1” — nothing found"), query),
+        subtitle = T(_("“%1” — nothing found in the book text"), query),
         item_table = {
-            {
-                text = _("Nothing found"),
-                dimmed = true,
-                callback = function() end,
-            },
+            { text = _("No book contains this") },
         },
         covers_full_width = true,
     }

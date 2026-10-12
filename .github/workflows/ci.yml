@@ -114,3 +114,28 @@ jobs:
         env:
           CC_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
         run: cargo check --target armv7-unknown-linux-gnueabihf
+
+  # The Lua side is what KOReader runs, and nothing else builds it: a Teal file
+  # that no longer type-checks, or whose generated Lua would not load, fails here
+  # rather than on a device.
+  lua:
+    name: Type-check and compile the Teal sources
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: LuaJIT, the interpreter the plugin runs under
+        run: sudo apt-get update && sudo apt-get install -y luajit
+
+      - name: Type-check
+        run: ./script/lua-check
+
+      - name: Compile
+        run: ./script/lua-build
+
+      # Skips unless an index was supplied, because the point of the test is the
+      # plugin's own path through the engine rather than the engine's behaviour.
+      - name: Plugin smoke test
+        env:
+          TS_TEST_INDEX: /tmp/turbosearch-ci.idx
+        run: ./script/lua-test "$TS_TEST_INDEX"
