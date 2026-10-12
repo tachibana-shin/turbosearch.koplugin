@@ -170,7 +170,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // session churned through. A fresh index that skips this measured 69% free
     // space, which is three times the data it holds.
     let t_meta = started.elapsed();
-    let reclaimed = engine.compact()?;
+    // Compaction is the single biggest write in the build: it rewrites the
+    // whole database to reclaim free pages. With rows written in key order the
+    // overhead is already down to 37,9%, so this trades a one-time write
+    // against a permanently smaller file, and the choice belongs to the caller
+    // rather than to the code — which is why it can be turned off.
+    let reclaimed = if std::env::var("NO_COMPACT").is_ok() {
+        eprintln!("compaction skipped (NO_COMPACT): keeping every page the build churned");
+        false
+    } else {
+        engine.compact()?
+    };
     let size_after_compact = engine.file_size();
     let t_compact = started.elapsed();
 
