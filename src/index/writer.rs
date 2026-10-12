@@ -48,6 +48,18 @@ struct TermCounts {
     dropped: u32,
 }
 
+/// Orders terms for a flush pass.
+///
+/// Byte order, not longest-first, and that ordering is the point. A B-tree
+/// appended in key order packs pages; the same writes in a different order make
+/// redb split and re-pack pages that are already written, which is where the
+/// measured 68% of a newly built file came from. Longest-first was chosen to
+/// pack full chunks, which is a saving measured in tens of bytes against a
+/// fragmentation cost measured in tens of megabytes.
+fn sort_for_flush(terms: &mut [Vec<u8>]) {
+    terms.sort_unstable();
+}
+
 /// Accumulates an indexing session and writes it into the database.
 pub struct Writer<'a> {
     engine: &'a Engine,
@@ -165,10 +177,7 @@ impl<'a> Writer<'a> {
         let target = self.max_pending / 2;
         // Clone the terms rather than holding a borrow over the flush below.
         let mut order: Vec<Vec<u8>> = self.pending.keys().cloned().collect();
-        order.sort_unstable_by_key(|t| {
-            std::cmp::Reverse(self.pending.get(t.as_slice()).map(Vec::len).unwrap_or(0))
-        });
-
+        sort_for_flush(&mut order);
         for term in &order {
             if self.pending_postings <= target {
                 break;
