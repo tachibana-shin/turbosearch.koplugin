@@ -20,13 +20,12 @@
 //!   re-tokenizing a bounded window of the decoded section. The reader sees
 //!   "Thám tử lừng danh", not "tham tu lung danh".
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::index::{posting, Dict, EntryMap, Posting};
 use crate::storage::{postings_table, Engine, RunResult};
 use crate::tokenize;
 
-use redb::ReadableTable;
 
 /// Terms a prefix query may expand to, and the document limit it may reach.
 pub const MAX_PREFIX_TERMS: usize = 64;
@@ -253,24 +252,28 @@ pub fn search(
 ///
 /// This is what makes `"thám tử"` match a document that says "Thám tử lừng
 /// danh Conan" and *not* match one that merely contains both words somewhere.
-pub fn search_phrase(
-    engine: &Engine,
-    dict: &Dict,
-    phrase: &str,
-) -> RunResult<Vec<Hit>> {
+///
+/// Each term's postings are read exactly once, and the section a position sits
+/// in is carried alongside it. Reading them twice and matching positions
+/// linearly was quadratic: on the full library a two-word phrase took four
+/// seconds, where a single pass takes tens of milliseconds.
+pub fn search_phrase(engine: &Engine, dict: &Dict, phrase: &str) -> RunResult<Vec<Hit>> {
     let terms = tokenize::tokenize(phrase);
     if terms.is_empty() {
         return Ok(Vec::new());
     }
 
     // Position lists per term, intersected on adjacency.
-    let mut lists: Vec<BTreeMap<u32, Vec<u32>>> = Vec::with_capacity(terms.len());
+    let mut lists: Vec<HashMap<u32, Vec<(u32, u16)>>> = Vec::with_capacity(terms.len());
     for t in &terms {
         let (expanded, _) = expand(dict, &t.term);
-        let mut by_doc: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        let mut by_doc: HashMap<u32, Vec<(u32, u16)>> = HashMap::new();
         for e in &expanded {
             for p in term_postings(engine, e)? {
-                by_doc.entry(p.doc_id).or_default().push(p.position);
+                by_doc
+                    .entry(p.doc_id)
+                    .or_default()
+                    .push((p.position, p.entry_idx));
             }
         }
         for v in by_doc.values_mut() {
@@ -285,32 +288,20 @@ pub fn search_phrase(
     order.sort_by_key(|&i| lists[i].len());
     let first = order[0];
 
-    // Each candidate position carries the section its own term sits in, so the
-    // hit can be resolved back to text like a single-term hit.
-    let mut candidates: BTreeMap<u32, Vec<(u32, u16)>> =
-        lists[first].keys().map(|d| (*d, Vec::new())).collect();
-    {
-        let seed = lists[first]
-            .iter()
-            .flat_map(|(doc, positions)| positions.iter().map(move |&p| (*doc, p)))
-            .collect::<Vec<_>>();
-        let entries = matches_for_positions(engine, &terms[first].term, &seed)?;
-        for ((doc, position), entry) in seed.into_iter().zip(entries) {
-            if let Some(slot) = candidates.get_mut(&doc) {
-                slot.push((position, entry));
-            }
-        }
-    }
-
+    let mut candidates: HashMap<u32, Vec<(u32, u16)>> =
+        lists[first].iter().map(|(d, p)| (*d, p.clone())).collect();
     for &i in &order[1..] {
-        let mut next = BTreeMap::new();
+        let mut next = HashMap::new();
         for (doc, positions) in &candidates {
             let Some(other) = lists[i].get(doc) else { continue };
             // A phrase needs position + 1 in the next term, so keep only the
             // positions that chain.
             let mut chained: Vec<(u32, u16)> = Vec::new();
             for &(p, e) in positions {
-                if other.binary_search(&(p + 1)).is_ok() {
+                if other
+                    .binary_search_by_key(&(p + 1), |&(q, _)| q)
+                    .is_ok()
+                {
                     chained.push((p, e));
                 }
             }
@@ -321,29 +312,32 @@ pub fn search_phrase(
         candidates = next;
     }
 
-    Ok(candidates
+    let mut out: Vec<Hit> = candidates
         .into_iter()
         .map(|(doc_id, positions)| {
             let score = positions.len() as u32;
             Hit::new(doc_id, score, positions[0].0, positions[0].1)
         })
-        .collect())
+        .collect();
+    out.sort_by_key(|h| h.doc_id);
+    Ok(out)
 }
 
 /// The section each `(doc_id, position)` posting of `term` sits in.
+///
+/// Kept for callers that already hold a candidate list; the phrase intersect no
+/// longer needs a second pass, which is what made it quadratic.
+#[allow(dead_code)]
 fn matches_for_positions(
     engine: &Engine,
     term: &[u8],
     wanted: &[(u32, u32)],
 ) -> RunResult<Vec<u16>> {
-    let mut out = vec![0u16; wanted.len()];
-    for p in term_postings(engine, term)? {
-        let key = (p.doc_id, p.position);
-        if let Some(i) = wanted.iter().position(|k| *k == key) {
-            out[i] = p.entry_idx;
-        }
-    }
-    Ok(out)
+    let want: HashMap<(u32, u32), u16> = term_postings(engine, term)?
+        .into_iter()
+        .map(|p| ((p.doc_id, p.position), p.entry_idx))
+        .collect();
+    Ok(wanted.iter().map(|k| want.get(k).copied().unwrap_or(0)).collect())
 }
 
 /// Locates a token inside a section's decoded text.
@@ -433,6 +427,7 @@ mod tests {
     use super::*;
     use crate::index::dict;
     use crate::tokenize::for_each_token_spanned;
+    use redb::ReadableTable;
 
     /// Rows in `POSTINGS` for one term.
     fn chunk_rows(engine: &Engine, term: &[u8]) -> u32 {
