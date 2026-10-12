@@ -620,8 +620,12 @@ Measured on the reference library (614 EPUB, 303,6 MB of text, 49,9 M tokens):
 | Mode | Database | Full build |
 |---|---|---|
 | `FileList` | **0,9 MB** | 28 s |
-| `TermsOnly` | **31,8 MB** (10,5% of text) | 1000 s |
-| `Full` | **163 MB** | 1396 s |
+| `TermsOnly` | **31,8 MB** (10,5% of text) | ~500 s |
+| `Full` | **163 MB** | ~700 s |
+
+> The two content timings above are extrapolated from a 200-book A/B after the
+> indexer stopped tokenizing every section twice. The `FileList` figure and every
+> size are measured directly. See §3.0.4.
 
 `TermsOnly` is where the interesting saving is. Positions are 80% of the
 postings payload — the `pos_gap` column alone — and dropping them takes the
@@ -635,6 +639,31 @@ sync on a big library, or for one where the user only wants to find a title.
 
 The mode is a `CONFIG` column, so it can be changed without a schema change, and
 re-indexing at a different depth is a rescan rather than a rebuild.
+
+### 3.0.4 The indexer was tokenizing twice
+
+Measured while trying to speed the build up, because the decoders were assumed to
+be the cost and are not: extracting all 614 books — decode and tokenize both —
+takes about 53 s, against a full index build of 1396 s. 96% of the build was
+somewhere else.
+
+It was one line. After the tokenizing pass that feeds the writer, the indexer
+called `tokenize::tokenize(&text)` again to count tokens for the progress line.
+`tokenize` collects into a `Vec<Token>`, and a `Token` owns its bytes, so on the
+measured library that second pass allocated roughly 1,2 GB to print one number.
+
+Counting in the sink of the pass that already exists removes it. A/B on 200
+books, same token count on both sides:
+
+| Mode | Before | After |
+|---|---|---|
+| `Full` | 269,4 s | **137,3 s** |
+| `TermsOnly` | 222,1 s | **108,2 s** |
+
+Half the build. The lesson generalises past this bug: when a build is slower than
+its parts, measure the parts before optimising any of them — the decoders were
+never the problem, and "zip and lol-html are already fast" was the correct
+instinct pointing at the wrong line.
 
 ### 3.1 Scan (metadata only, does not open content)
 

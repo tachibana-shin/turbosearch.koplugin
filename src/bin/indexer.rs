@@ -22,7 +22,7 @@ use turbosearch::format::{epub, mobi, plain, sniff};
 use turbosearch::index::{EntryMap, dict, entrymap, query, writer};
 use turbosearch::storage::book::{Format, scan_scope};
 use turbosearch::storage::{Engine, RunError, book::FileEntry, config::Config};
-use turbosearch::tokenize::{self, for_each_token_spanned};
+use turbosearch::tokenize::for_each_token_spanned;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
@@ -175,6 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // `pos_gap` is a delta, so restarting per section would make positions
             // non-monotonic within a document and corrupt the column.
             let mut position = 0u32;
+            let mut section_tokens = 0u64;
             // Every section's entry map, held until the book is done. Writing
             // them one at a time is one transaction per section, and a
             // 12 000-section library pays for twelve thousand of them; one per
@@ -188,9 +189,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Position and byte offset are offered together, which is what makes
                 // the checkpoint sparse rather than one per token.
                 if content_mode.has_positions() {
+                    // The count comes from the same pass rather than a second
+                    // `tokenize::tokenize` call: that re-tokenized every section
+                    // and allocated a `Vec` of owned terms, which on the measured
+                    // library is ~1,2 GB of churn to print one number.
                     position = for_each_token_spanned(&text, position, |term, p, start, _end| {
                         b.offer(p, start as u32);
                         let _ = w.add(term, book_id as u32, p, entry_idx as u16);
+                        section_tokens += 1;
                     });
                 } else {
                     // `TermsOnly`: one posting per term and book, which is what
@@ -209,6 +215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     for_each_token_spanned(&text, position, |term, p, _start, _end| {
                         seen.insert(term.to_vec(), (p, entry_idx as u16));
                         next = next.max(p + 1);
+                        section_tokens += 1;
                     });
                     for (term, (p, entry)) in seen {
                         let _ = w.add(&term, book_id as u32, p, entry);
@@ -218,8 +225,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 maps.push((entry_idx as u16, b.finish()));
 
                 text_bytes += text.len() as u64;
-                tokens += tokenize::tokenize(&text).len() as u64;
             }
+            tokens += section_tokens;
             for (entry_idx, map) in &maps {
                 writer::put_entry_map(&engine, book_id, *entry_idx, map)?;
             }
