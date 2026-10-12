@@ -931,25 +931,32 @@ fn open_creates_a_missing_parent_directory() {
 
 #[test]
 fn table_names_match_the_spec() {
-    // These strings are the on-disk schema; renaming one orphans user data.
-    use turbosearch::storage::*;
-    let names = [
-        TABLE_META,
-        TABLE_BOOKS,
-        TABLE_PATHS,
-        TABLE_CONFIG,
-        TABLE_METADATA,
-        TABLE_METAIDX,
-        TABLE_DICT,
-        TABLE_DICT_DELTA,
-        TABLE_POSTINGS,
-        TABLE_ENTRYMAP,
-    ];
-    assert_eq!(names[0], "meta");
-    assert_eq!(names[1], "books");
-    assert_eq!(names[2], "paths");
-    assert_eq!(names[3], "config");
-    let mut all = names.to_vec();
+    // These strings are the on-disk schema; renaming one orphans user data. The
+    // list and the migration file have to agree, so this checks one against the
+    // other rather than against a copy of either.
+    use turbosearch::storage::TABLES;
+    let migration = include_str!("../migrations/0001_init.sql");
+
+    for name in TABLES {
+        let pattern = format!("CREATE TABLE IF NOT EXISTS {name} (");
+        assert!(
+            migration.contains(&pattern),
+            "{name} is in TABLES but not created by the migration"
+        );
+    }
+    // And the other way round: a table the code never opens would only show up
+    // as a file nobody reads.
+    for line in migration.lines() {
+        if let Some(rest) = line.trim().strip_prefix("CREATE TABLE IF NOT EXISTS ") {
+            let name = rest.split_whitespace().next().unwrap_or_default();
+            assert!(
+                TABLES.contains(&name),
+                "{name} is created by the migration but missing from TABLES"
+            );
+        }
+    }
+    assert_eq!(TABLES.len(), 9, "the engine opens nine tables");
+    let mut all = TABLES.to_vec();
     let before = all.len();
     all.sort_unstable();
     all.dedup();

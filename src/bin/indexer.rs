@@ -43,23 +43,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
     let max_books: Option<usize> = std::env::var("MAX_BOOKS").ok().and_then(|v| v.parse().ok());
     let want_search = std::env::var("SEARCH").ok();
-    // `CONTENT_MODE=full|terms|files`, so the three depths can be compared on the
-    // same library without editing a config row.
-    let content_mode = match std::env::var("CONTENT_MODE").as_deref() {
-        Ok("terms") => turbosearch::storage::config::ContentMode::TermsOnly,
-        Ok("files") => turbosearch::storage::config::ContentMode::FileList,
-        _ => turbosearch::storage::config::ContentMode::Full,
+    // `--mode full|terms|files` persists the choice into CONFIG.
+    let set_mode: Option<String> = {
+        let argv: Vec<String> = std::env::args().collect();
+        argv.iter()
+            .position(|a| a == "--mode")
+            .and_then(|i| argv.get(i + 1))
+            .cloned()
     };
+
+    // The database is only wiped when asked, because wiping it also wipes the
+    // CONFIG row the content mode lives in — and a tool that silently discards
+    // the setting it was just given is worse than one that refuses.
+    if std::env::var("FRESH").is_ok() {
+        std::fs::remove_file(&db).ok();
+        // The WAL and shared-memory sidecars survive the main file and make the
+        // next open read a stale journal, so they go too.
+        for suffix in ["-wal", "-shm"] {
+            std::fs::remove_file(format!("{}{}", db.display(), suffix)).ok();
+        }
+    }
+    let engine = Engine::open(&db).map_err(|e| format!("open {db:?}: {e}"))?;
+
+    // The stored config decides how much content to index. `--mode` writes it
+    // back, so the setting survives to the next run; `CONTENT_MODE` instead
+    // overrides for this run only, which is how the three depths were measured
+    // against the same library without editing a config row each time.
+    let stored = engine.config().map_err(|e| format!("read config: {e}"))?;
+    let content_mode = if let Some(m) = &set_mode {
+        let parsed = turbosearch::storage::config::ContentMode::from_name(m)
+            .ok_or_else(|| format!("unknown content mode {m:?}: expected full, terms or files"))?;
+        let mut cfg = stored.clone();
+        cfg.content_mode = parsed;
+        engine
+            .set_config(&cfg)
+            .map_err(|e| format!("write config: {e}"))?;
+        parsed
+    } else {
+        match std::env::var("CONTENT_MODE").as_deref() {
+            Ok("terms") => turbosearch::storage::config::ContentMode::TermsOnly,
+            Ok("files") => turbosearch::storage::config::ContentMode::FileList,
+            Ok("full") => turbosearch::storage::config::ContentMode::Full,
+            _ => stored.content_mode,
+        }
+    };
+    if set_mode.is_some() {
+        eprintln!(
+            "content mode: {} (written to CONFIG, replacing {})",
+            content_mode.name(),
+            stored.content_mode.name()
+        );
+    } else if content_mode != stored.content_mode {
+        eprintln!(
+            "content mode: {} (CONTENT_MODE overrides the stored {})",
+            content_mode.name(),
+            stored.content_mode.name()
+        );
+    } else {
+        eprintln!("content mode: {} (from config)", content_mode.name());
+    }
     eprintln!(
-        "content mode: {content_mode:?} (content {}, positions {})",
+        "  content: {}, positions: {}",
         content_mode.has_content(),
         content_mode.has_positions()
     );
-
-    if std::fs::remove_file(&db).is_err() {
-        // A missing file is fine; anything else the open will report.
-    }
-    let engine = Engine::open(&db).map_err(|e| format!("open {db:?}: {e}"))?;
 
     let started = Instant::now();
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -450,7 +497,7 @@ fn tempdir_engine() -> Engine {
     if let Err(e) = std::fs::create_dir_all(&dir) {
         panic!("create {}: {e}", dir.display());
     }
-    let path = dir.join("turbosearch.scan.redb");
+    let path = dir.join("turbosearch-scanned.sqlite");
     let _ = std::fs::remove_file(&path);
     Engine::open(path).expect("open scratch engine")
 }

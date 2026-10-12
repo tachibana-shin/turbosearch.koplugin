@@ -131,6 +131,32 @@ impl ContentMode {
     pub fn has_positions(&self) -> bool {
         matches!(self, ContentMode::Full)
     }
+
+    /// Parses the name `--mode` and `CONTENT_MODE` both accept.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "full" => Some(ContentMode::Full),
+            "terms" => Some(ContentMode::TermsOnly),
+            "files" => Some(ContentMode::FileList),
+            _ => None,
+        }
+    }
+
+    /// The name the UI and the logs use, which is also what `CONTENT_MODE`
+    /// accepts as an override.
+    pub fn name(&self) -> &'static str {
+        match self {
+            ContentMode::Full => "full",
+            ContentMode::TermsOnly => "terms",
+            ContentMode::FileList => "files",
+        }
+    }
+}
+
+impl std::fmt::Display for ContentMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 impl Default for IndexDepth {

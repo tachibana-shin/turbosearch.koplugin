@@ -26,18 +26,22 @@ pub use pack::{Reader, Writer as PackWriter};
 /// Book count ceiling from `note.md` section 2: `book_id` is `u16`.
 pub const MAX_BOOKS: u32 = u16::MAX as u32 + 1;
 
-pub const TABLE_META: &str = "meta";
-pub const TABLE_BOOKS: &str = "books";
-pub const TABLE_PATHS: &str = "paths";
-pub const TABLE_CONFIG: &str = "config";
-
-/// Index tables, declared here for schema stability but used
-pub const TABLE_METADATA: &str = "metadata";
-pub const TABLE_METAIDX: &str = "metaidx";
-pub const TABLE_DICT: &str = "dict";
-pub const TABLE_DICT_DELTA: &str = "dict_delta";
-pub const TABLE_POSTINGS: &str = "postings";
-pub const TABLE_ENTRYMAP: &str = "entrymap";
+/// The nine table names the engine opens.
+///
+/// Declared here rather than at each call site because `sql::schema::MIGRATION`
+/// is the file that actually creates them, and this list is what a reader
+/// checks it against.
+pub const TABLES: [&str; 9] = [
+    "meta",
+    "books",
+    "metadata",
+    "metaidx",
+    "config",
+    "postings",
+    "dict",
+    "dict_delta",
+    "entrymap",
+];
 
 /// The error and result alias live with the engine now, because SQLite's error
 /// type is what every accessor actually returns:

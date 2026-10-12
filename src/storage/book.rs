@@ -592,7 +592,3 @@ struct PathRow {
     path: String,
     id: i64,
 }
-
-pub fn paths_table() -> redb::TableDefinition<'static, &'static str, u16> {
-    redb::TableDefinition::new(super::TABLE_PATHS)
-}

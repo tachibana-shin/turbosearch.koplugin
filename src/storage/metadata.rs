@@ -501,16 +501,6 @@ pub fn book_ids(index: &MetaIndex, needle: &str) -> Vec<u16> {
     index.search(needle)
 }
 
-/// The `METADATA` table, keyed by `book_id`.
-pub fn metadata_table() -> redb::TableDefinition<'static, u16, &'static [u8]> {
-    redb::TableDefinition::new(super::TABLE_METADATA)
-}
-
-/// The `METAIDX` table, holding exactly one row.
-pub fn metaidx_table() -> redb::TableDefinition<'static, &'static str, &'static [u8]> {
-    redb::TableDefinition::new(super::TABLE_METAIDX)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
