@@ -65,7 +65,28 @@ ELF 32-bit ARM EABI5 object, and the resulting `.so` needs only `libc`,
 
 The plugin searches the library from inside the reader: a query box prefilled
 with the last query, a results menu carrying each book's title, and a tap opens
-the book.
+the book. Beside **Search** in that box is a **Settings** button, and there is a
+second menu entry for it, so a reader can find out what an index holds without
+dismissing a query first.
+
+The settings screen reports the index it points at, its size on disk including
+the write-ahead log, its term count and its content mode, and lets the reader
+choose what the query means:
+
+| Mode | Reads the query as |
+|---|---|
+| `Text` | book text, with `"quoted"` phrases matching exactly |
+| `Metadata` | title, author and series only |
+| `Pattern` | a regular expression over the terms in the index |
+
+A content mode that cannot do what the chosen mode asks is said out loud rather
+than discovered by typing: a `files` index has no text to search, and a `terms`
+index has nothing for a phrase to match.
+
+There is no case-sensitivity setting, and not by omission. The index stores
+folded terms, so a query never had a case to be sensitive to; giving it one would
+mean storing the original alongside every term, doubling an index whose size the
+whole design is built around.
 
 ```sh
 script/build-plugin           # host library, for the desktop reader
