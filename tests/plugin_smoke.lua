@@ -8,7 +8,7 @@
 --
 -- Run with: script/lua-test
 
-local PLUGIN_DIR = "plugin/turbosearch.koplugin/"
+local PLUGIN_DIR = "build/turbosearch.koplugin/"
 local PLUGIN = PLUGIN_DIR .. "main.lua"
 local INDEX = os.getenv("TS_TEST_INDEX") or "/tmp/opencode/e2e.idx"
 
@@ -229,8 +229,14 @@ check("a query with no hits shows the empty state",
 
 io.write("\nopening a book\n")
 
+-- Search again first: the empty-state query above left the menu holding a row
+-- with no path, which is the correct thing for that screen and the wrong row to
+-- try to open.
+captured.menu = nil
+instance:search("thám tử")
 local path = captured.menu and captured.menu.item_table[1]
     and captured.menu.item_table[1].path
+check("a row to open exists", path and path ~= "", path)
 captured.opened = nil
 instance:openBook(path)
 check("selecting a row opens that file", captured.opened == path, captured.opened)

@@ -1,8 +1,12 @@
-# Build artifacts: the engine library and the Lua compiled from Teal live in
-# the plugin directory beside the source, and are produced by script/build-plugin.
-plugin/turbosearch.koplugin/*.so
-plugin/turbosearch.koplugin/**/*.so
-plugin/turbosearch.koplugin/turbosearch.lua
+# Everything KOReader loads is generated: the Lua from tl/, the engine from cargo,
+# and the per-platform release archives. There is no plugin/ in the repository —
+# `make plugin` assembles it, and `make install` points the reader at it.
+# The compile-time database sqlx verifies its checked macros against.
+.sqlx-dev.db
+.sqlx-dev.db-wal
+.sqlx-dev.db-shm
+
+build/
 
 # Teal: the compiled Lua is a build artifact, the .tl source is not.
 tl/*.lua

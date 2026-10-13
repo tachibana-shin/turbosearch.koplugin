@@ -16,8 +16,8 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local FileManager = require("apps/filemanager/filemanager")
 local Menu = require("ui/widget/menu")
 
-local PLUGIN_DIR = "/home/shin/turbosearch/plugin/turbosearch.koplugin/"
-local INDEX = "/tmp/opencode/e2e.idx"
+local PLUGIN_DIR = "/home/shin/turbosearch/build/turbosearch.koplugin/"
+local INDEX = os.getenv("TS_PROBE_INDEX") or "/tmp/opencode/e2e.idx"
 local QUERY = "thám tử"
 
 -- Inert unless `TURBOSEARCH_PROBE` is set, so symlinking this plugin in costs

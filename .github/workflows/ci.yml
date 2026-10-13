@@ -60,6 +60,9 @@ jobs:
         # than silently skipped: `--format=terse` would hide that.
         run: cargo test --workspace -- --ignored --format=pretty || true
 
+      - name: Everything else, in order
+        run: make check
+
   library:
     name: Real-library tests (opt-in)
     runs-on: ubuntu-latest
@@ -127,15 +130,39 @@ jobs:
       - name: LuaJIT, the interpreter the plugin runs under
         run: sudo apt-get update && sudo apt-get install -y luajit
 
-      - name: Type-check
-        run: ./script/lua-check
-
-      - name: Compile
-        run: ./script/lua-build
-
-      # Skips unless an index was supplied, because the point of the test is the
-      # plugin's own path through the engine rather than the engine's behaviour.
-      - name: Plugin smoke test
+      # One target, because the shell scripts that used to do each step were
+      # folded into the Makefile: a mistake in one of them now fails the same
+      # target the same way, and there is one place to see what the build does.
+      - name: Type-check, compile, and run the plugin smoke test
         env:
+          # Not supplied here, so the test skips rather than fails: it needs an
+          # index, and building one needs a library.
           TS_TEST_INDEX: /tmp/turbosearch-ci.idx
-        run: ./script/lua-test "$TS_TEST_INDEX"
+        run: make lua-test
+
+  # A cross-compile per platform, because the alternative — one job that builds
+  # everything — hides which target broke behind whichever one failed first.
+  release:
+    name: Release archives (one per platform)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-gnu \
+                             armv7-unknown-linux-gnueabihf \
+                             aarch64-unknown-linux-gnu
+
+      # zig cc stands in for the cross linkers, the way it does locally.
+      - name: Install zig
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Build the per-platform archives
+        run: make packages VERSION=ci
+
+      - name: Show what would be published
+        run: python3 script/release_manifest.py build/turbosearch.json < /dev/null && \
+             cat build/turbosearch.json

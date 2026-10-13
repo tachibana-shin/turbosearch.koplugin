@@ -41,6 +41,9 @@ a Kindle has neither the space for 163 MB nor the patience for 114 s, and
 | `plugin/` | The KOReader plugin: Lua, engine library, `.so` |
 | `migrations/` | The only schema definition; also drives sqlx's compile-time checks |
 | `tests/` | Integration tests, including ones that need a real library |
+| `tests/koreader-probe/` | The reader-inspection probe, a KOReader plugin in its own right |
+| `script/` | The Teal compiler fetcher, the release-index writer, and the uinput helper |
+| `build/` | Generated, not committed: the plugin, and one release archive per platform |
 
 ## Building the engine
 
@@ -89,8 +92,10 @@ mean storing the original alongside every term, doubling an index whose size the
 whole design is built around.
 
 ```sh
-script/build-plugin           # host library, for the desktop reader
-script/build-plugin --arm     # armv7 library, for the device
+make plugin                   # build the plugin for this machine
+make plugin PLATFORM=kindle   # or for the Kindle, or for aarch64
+make install                  # point KOReader at it
+make packages                 # one release archive per platform, in build/
 ```
 
 The two libraries sit in `plugin/turbosearch.koplugin/` side by side and the
@@ -120,10 +125,10 @@ that LuaJIT runs — because the C ABI is where a wrong type costs a use-after-f
 rather than a Lua error.
 
 ```sh
-script/lua-check    # type-check the Teal sources
-script/lua-build    # compile them into the plugin directory
-script/lua-test     # run the plugin against stubbed KOReader modules
-./script/tl --version
+make lua-check      # type-check the Teal sources
+make lua-build      # compile them into the plugin directory
+make lua-test       # the plugin against stubbed KOReader widgets
+make help           # every target
 ```
 
 `script/tl` pins a compiler version and its checksum, and downloads it into
@@ -131,6 +136,19 @@ script/lua-test     # run the plugin against stubbed KOReader modules
 carries the binary. `tl/ffi.tl` declares the slice of `require("ffi")` the
 engine uses — without it `tl check` reports `module not found` on plain Lua and
 then fails on every use of ffi, a check that cannot fail for a real reason.
+
+Everything the plugin touches is declared once, in `tl/`, against a stub of the
+reader's own module: `Menu`, `InputDialog`, `ButtonDialog`, `ConfirmBox`,
+`UIManager`, `LuaSettings`, `Dispatcher`, `FileManager`. That is what turns a
+field the installed reader does not have into a build error rather than a screen
+that silently does not do what it looks like — `dimmed`, `UIManager:setInputDialog`
+and `ui/widget/alertdialog` were all found on a device, one at a time, and would
+have been found here. `MODE` and the engine's ABI are checked the same way.
+
+What Teal does *not* catch: a case-insensitive setting, because the index stores
+folded terms — a query never had a case to be sensitive to, and giving it one
+would mean storing the original beside every term and doubling an index whose
+size the whole design is built around.
 
 ### Verifying against a real reader
 
@@ -153,9 +171,10 @@ real `Menu` accepted, and a book opened in 0.275 s.
 ## Tests
 
 ```sh
-cargo test                # 318 tests, no library needed
-cargo test -- --ignored   # 18 tests that need a KOReader library
-script/lua-test           # the plugin, against stubbed KOReader widgets
+make test                 # 318 tests, no library needed
+make test-library         # 18 tests that need a KOReader library
+make lua-test             # the plugin, against stubbed KOReader widgets
+make check                # everything CI runs
 ```
 
 The tests behind `--ignored` decode real MOBI files, check span boundaries

@@ -121,9 +121,13 @@ local MODE_FILE_LIST: integer = 2
 --- the engine has nothing useful left to do. The alternative shape — returning
 --- `(boolean, string)` — needs `pcall`, whose polymorphic multi-value return
 --- Teal cannot type, which would cost more than it gives.
-local function load_lib(path: string)
+local function load_lib(path: string): any
    C = ffi.load(path)
    loaded = true
+   --- The handle is handed back so a caller can tell a loaded engine from a
+   --- refused one; pcall on a function that returns nothing has one value to
+   --- give, which is what made the caller unable to tell the two apart.
+   return C
 end
 
 --- True once a library has been loaded.
@@ -160,15 +164,15 @@ local function last_error(): string
 end
 
 --- Opens an index at `path`.
-local function open_index(path: string): Handle
+local function open_index(path: string): Handle, string
    if not loaded then
-      error("engine not loaded; call load_lib() first")
+      return nil, "engine not loaded; call load_lib() first"
    end
    local ptr: any = C.ts_open(path)
    if ptr == ffi.NULL then
-      error(last_error())
+      return nil, last_error()
    end
-   return { ptr = ptr }
+   return { ptr = ptr }, ""
 end
 
 --- Closes a handle. Idempotent, so a teardown hook may run twice.
@@ -243,12 +247,12 @@ end
 --- A pattern matching too many terms is refused by the engine rather than
 --- answered, because the list would be long enough that nobody reads it and the
 --- reader would have waited through the whole thing.
-local function search_pattern(handle: Handle, query: string, opts?: SearchOptions): {Hit}
+local function search_pattern(handle: Handle, query: string, opts?: SearchOptions): {Hit}, string
    local o: SearchOptions = opts or {} as SearchOptions
    local indirect: any = ffi.new("int[1]")
    local buf: any = C.ts_search_regex(handle.ptr, query, indirect)
    if buf == ffi.NULL then
-      error(last_error())
+      return {} as {Hit}, last_error()
    end
    local lines: {string} = drain(buf)
    local result: {Hit} = {}
@@ -264,12 +268,12 @@ local function search_pattern(handle: Handle, query: string, opts?: SearchOption
    return result
 end
 
-local function search(handle: Handle, query: string, opts?: SearchOptions): {Hit}
+local function search(handle: Handle, query: string, opts?: SearchOptions): {Hit}, string
    local o: SearchOptions = opts or {} as SearchOptions
    local indirect: any = ffi.new("int[1]")
    local buf: any = C.ts_search(handle.ptr, query, indirect)
    if buf == ffi.NULL then
-      error(last_error())
+      return {} as {Hit}, last_error()
    end
    local lines: {string} = drain(buf)
 
@@ -283,19 +287,19 @@ local function search(handle: Handle, query: string, opts?: SearchOptions): {Hit
    if o.limit and o.limit > 0 and #result > o.limit then
       return table.move(result, 1, o.limit, 1, {} as {Hit})
    end
-   return result
+   return result, ""
 end
 
 --- Searches metadata: title, author, series and description.
 ---
 --- The engine writes `"<doc_id>\t<title>"` lines, so the parser differs from
 --- `search`; the shared `drain` is what keeps the buffer handling in one place.
-local function search_meta(handle: Handle, query: string, opts?: SearchOptions): {Hit}
+local function search_meta(handle: Handle, query: string, opts?: SearchOptions): {Hit}, string
    local o: SearchOptions = opts or {} as SearchOptions
    local indirect: any = ffi.new("int[1]")
    local buf: any = C.ts_search_meta(handle.ptr, query, indirect)
    if buf == ffi.NULL then
-      error(last_error())
+      return {} as {Hit}, last_error()
    end
    local lines: {string} = drain(buf)
 
@@ -335,7 +339,7 @@ end
 --- The dispatch lives here rather than in the caller so that a caller cannot
 --- pass `Pattern` to the phrase path and quietly get a phrase: the three are
 --- different index operations and they are not interchangeable.
-local function search_as(handle: Handle, mode: SearchMode, query: string, opts?: SearchOptions): {Hit}
+local function search_as(handle: Handle, mode: SearchMode, query: string, opts?: SearchOptions): {Hit}, string
    if mode == "Metadata" then
       return search_meta(handle, query, opts)
    end

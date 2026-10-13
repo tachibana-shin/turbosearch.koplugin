@@ -1,0 +1,45 @@
+# semantic-release, shaped the way the rakuyomi plugin's is: the version comes from
+# the commit messages, the changelog is generated from them, and the release carries
+# one archive per platform rather than one holding all of them.
+#
+# `verifyRelease` only builds, it does not tag: the platform archives are attached
+# here, so what is published is exactly what this run built.
+
+branches:
+  - main
+
+plugins:
+  - "@semantic-release/commit-analyzer"
+  - "@semantic-release/release-notes-generator"
+  - [
+      "@semantic-release/changelog",
+      {
+        "changelogFile": "CHANGELOG.md"
+      }
+    ]
+  - [
+      "@semantic-release/git",
+      {
+        "assets": ["CHANGELOG.md"],
+        "message": "chore(release): ${nextRelease.version}\n\n${nextRelease.notes}"
+      }
+    ]
+  - [
+      "@semantic-release/exec",
+      {
+        "verifyReleaseCmd": "make packages"
+      }
+    ]
+  - [
+      "@semantic-release/github",
+      {
+        "assets": [
+          { "path": "build/turbosearch-desktop-${nextRelease.version}.zip", "label": "Desktop (Linux) build" },
+          { "path": "build/turbosearch-kindle-${nextRelease.version}.zip", "label": "Kindle Paperwhite 3 build" },
+          { "path": "build/turbosearch-aarch64-${nextRelease.version}.zip", "label": "AArch64 build" },
+          { "path": "build/turbosearch.json", "label": "Plugin manifest" }
+        ],
+        "successComment": false
+      }
+    ]
+  - "semantic-release-export-data"

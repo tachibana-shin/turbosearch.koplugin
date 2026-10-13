@@ -1,0 +1,19 @@
+{
+  "name": "turbosearch",
+  "private": true,
+  "description": "Embedded full-text search for KOReader on Kindle Paperwhite 3",
+  "//": "The engine is Rust; this file exists for semantic-release, the same way the rakuyomi plugin's does.",
+  "scripts": {
+    "release": "semantic-release"
+  },
+  "devDependencies": {
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/exec": "^6.0.3",
+    "@semantic-release/git": "^10.0.1",
+    "@semantic-release/github": "^11.0.3",
+    "@semantic-release/release-notes-generator": "^14.0.4",
+    "semantic-release": "^24.2.7",
+    "semantic-release-export-data": "^1.0.1"
+  }
+}
