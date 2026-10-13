@@ -186,7 +186,12 @@ function Turbosearch:onTurbosearchSearch()
         },
     }
     UIManager:show(dialog)
-    UIManager:setInputDialog(dialog)
+    -- Raising the keyboard is what puts the cursor in the field. `UIManager:
+    -- setInputDialog` used to be the way to hand the dialog to the reader as the
+    -- active input, but no version here has that method and nothing calls it, so
+    -- the call raised as soon as the dialog was shown and aborted the handler --
+    -- the reader logged an error instead of focusing the field.
+    dialog:onShowKeyboard()
 end
 
 --- Runs a query and shows the results, or the reason there are none.

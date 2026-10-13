@@ -20,21 +20,64 @@ local PLUGIN_DIR = "/home/shin/turbosearch/plugin/turbosearch.koplugin/"
 local INDEX = "/tmp/opencode/e2e.idx"
 local QUERY = "thám tử"
 
--- Inert unless `TURBOSEARCH_PROBE=1`, so symlinking this plugin in costs
+-- Inert unless `TURBOSEARCH_PROBE` is set, so symlinking this plugin in costs
 -- nothing and running it is a deliberate act.
-local PROBE_PATH = os.getenv("TURBOSEARCH_PROBE") == "1"
+--
+-- Two modes:
+--   TURBOSEARCH_PROBE=show    open the plugin's real search dialog and leave it
+--                              on screen, unaddressable by automation because
+--                              KOReader has no input device on this machine
+--   TURBOSEARCH_PROBE=1        run the full verification and close everything
+local MODE = os.getenv("TURBOSEARCH_PROBE")
+local PROBE_PATH = MODE == "1"
+local SHOW_DIALOG = MODE == "show"
 
 local Probe = WidgetContainer:extend{
     name = "turbosearch_probe",
 }
 
 function Probe:init()
-    if not PROBE_PATH then
+    if not PROBE_PATH and not SHOW_DIALOG then
         return
     end
     UIManager:scheduleIn(4, function()
+        if SHOW_DIALOG then
+            self:showSearchDialog()
+            return
+        end
         self:probe()
     end)
+end
+
+--- Opens the plugin's own search dialog and leaves it there.
+---
+--- The dialog is shown but never closed, because the input path that would let
+--- anything dismiss it does not exist here: `/dev/input/event*` is root:input
+--- and this user is not in that group, so KOReader opens no input device and
+--- receives no keys. Constructing it is the furthest automation can go; typing
+--- into it has to come from outside the machine.
+function Probe:showSearchDialog()
+    logger.info("PROBE: opening the plugin search dialog")
+
+    -- The instance the reader itself loaded, rather than a new one: building a
+    -- second goes through WidgetContainer:new, which calls init(), and init()
+    -- registers the plugin into a menu it does not have. The reader's own
+    -- instance already has that.
+    local PluginLoader = require("pluginloader")
+    local instance = PluginLoader:getPluginInstance("turbosearch")
+    if not instance then
+        logger.info("PROBE: no turbosearch instance loaded")
+        return
+    end
+    logger.info("PROBE: found the plugin instance")
+
+    local ok, err = pcall(function()
+        instance:onTurbosearchSearch()
+        logger.info("PROBE: onTurbosearchSearch returned; dialog left open")
+    end)
+    if not ok then
+        logger.info("PROBE: failed", tostring(err))
+    end
 end
 
 function Probe:probe()
