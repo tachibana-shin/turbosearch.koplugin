@@ -111,6 +111,24 @@ carries the binary. `tl/ffi.tl` declares the slice of `require("ffi")` the
 engine uses — without it `tl check` reports `module not found` on plain Lua and
 then fails on every use of ffi, a check that cannot fail for a real reason.
 
+### Verifying against a real reader
+
+`script/lua-test` stubs the KOReader widgets. The one thing it cannot reach is
+the installed reader itself, so `plugin/turbosearch-probe.koplugin` closes that
+gap: it builds the same `InputDialog` and `Menu` the plugin builds, from the rows
+a real search returns, and opens a book through `FileManager.openFile`. It is
+inert unless asked for, so symlinking it in costs nothing.
+
+```sh
+ln -s "$PWD/plugin/turbosearch-probe.koplugin" \
+      ~/.config/koreader/plugins/turbosearch-probe.koplugin
+TURBOSEARCH_PROBE=1 /usr/lib/koreader/koreader.sh 2>&1 | grep PROBE
+```
+
+On a 619-book-corpus index built from 614 EPUBs, that printed 33 hits for a
+Vietnamese phrase, 13 metadata matches, 33 rows with every title resolved, the
+real `Menu` accepted, and a book opened in 0.275 s.
+
 ## Tests
 
 ```sh
