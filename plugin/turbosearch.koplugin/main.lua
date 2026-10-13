@@ -179,6 +179,17 @@ end
 
 --- Shows the query box, pre-filled with the last query so a follow-up search
 --- is one edit away.
+--- The engine, loading it if this is the first thing to ask.
+---
+--- Exposed because the settings screen reads an index before any search has run,
+--- and reaching into `self.binding` for it made a reader who opened settings
+--- first see "the engine is not loaded" — a dead end they had to leave by
+--- searching and coming back. Loading on demand is the same call the search path
+--- makes, cached, so it costs the first time only.
+function Turbosearch:engine()
+    return load_engine()
+end
+
 function Turbosearch:onTurbosearchSearch()
     local settings = self:loadSettings()
     local dialog

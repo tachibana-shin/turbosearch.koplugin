@@ -27,22 +27,28 @@ local QUERY = "thám tử"
 --   TURBOSEARCH_PROBE=show    open the plugin's real search dialog and leave it
 --                              on screen, unaddressable by automation because
 --                              KOReader has no input device on this machine
+--   TURBOSEARCH_PROBE=settings open the plugin's settings screen
 --   TURBOSEARCH_PROBE=1        run the full verification and close everything
 local MODE = os.getenv("TURBOSEARCH_PROBE")
 local PROBE_PATH = MODE == "1"
 local SHOW_DIALOG = MODE == "show"
+local SHOW_SETTINGS = MODE == "settings"
 
 local Probe = WidgetContainer:extend{
     name = "turbosearch_probe",
 }
 
 function Probe:init()
-    if not PROBE_PATH and not SHOW_DIALOG then
+    if not PROBE_PATH and not SHOW_DIALOG and not SHOW_SETTINGS then
         return
     end
     UIManager:scheduleIn(4, function()
         if SHOW_DIALOG then
             self:showSearchDialog()
+            return
+        end
+        if SHOW_SETTINGS then
+            self:showSettingsScreen()
             return
         end
         self:probe()
@@ -80,8 +86,46 @@ function Probe:showSearchDialog()
     end
 end
 
+--- Opens the plugin's own settings screen and leaves it there.
+---
+--- Same reason as the search dialog: the settings are the part of the plugin a
+--- reader reaches for most and the only one that reads an index rather than a
+--- book, so it is worth seeing work in the reader.
+function Probe:showSettingsScreen()
+    logger.info("PROBE: opening the plugin settings screen")
+
+    local PluginLoader = require("pluginloader")
+    local instance = PluginLoader:getPluginInstance("turbosearch")
+    if not instance then
+        logger.info("PROBE: no turbosearch instance loaded")
+        return
+    end
+    logger.info("PROBE: found the plugin instance")
+
+    local ok, err = pcall(function()
+        instance:onTurbosearchSettings()
+        logger.info("PROBE: onTurbosearchSettings returned; settings left open")
+    end)
+    if not ok then
+        logger.info("PROBE: failed", tostring(err))
+    end
+end
+
 function Probe:probe()
     logger.info("PROBE: ==== begin ====")
+
+    local PluginLoader = require("pluginloader")
+    local LuaSettings = require("luasettings")
+    local DataStorage = require("datastorage")
+    local settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/turbosearch.lua")
+    settings:saveSetting("index_path", INDEX)
+    self.settings_for_report = settings
+
+    local LuaSettings = require("luasettings")
+    local DataStorage = require("datastorage")
+    local settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/turbosearch.lua")
+    settings:saveSetting("index_path", INDEX)
+    self.settings_for_report = settings
 
     package.path = PLUGIN_DIR .. "?.lua;" .. package.path
     local ts = require("turbosearch")
@@ -155,6 +199,30 @@ function Probe:probe()
 
     for i = 1, math.min(#items, 5) do
         logger.info("PROBE: row", i, items[i].text, "|", items[i].path)
+    end
+
+    --- The settings screen reads this same index through the same calls, so its
+    --- report is exercised here rather than only in the stub test: what it prints
+    --- is what a reader reads off the screen.
+    local Settings = require("turbosearch_settings")
+    local screen = Settings:new{
+        main = PluginLoader:getPluginInstance("turbosearch"),
+    }
+    -- report returns a table plus an empty string, or nil plus a message, so
+    -- there are three things to separate: a raise, a refusal, and a report.
+    -- `pcall` puts the success flag first, which is what this got wrong first
+    -- time and reported a report as `true`.
+    local ok, result, message = pcall(screen.report, screen, self.settings_for_report)
+    if not ok then
+        logger.info("PROBE: settings report raised", tostring(result))
+    elseif type(result) ~= "table" then
+        logger.info("PROBE: settings refused", tostring(message))
+    else
+        logger.info("PROBE: settings index", result.index)
+        logger.info("PROBE: settings bytes", result.bytes)
+        logger.info("PROBE: settings terms", result.terms)
+        logger.info("PROBE: settings content", result.content)
+        logger.info("PROBE: settings warn", result.warn or "(none)")
     end
 
     -- The rows carry the field class the plugin's own rows do, so what follows

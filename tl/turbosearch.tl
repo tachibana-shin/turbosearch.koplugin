@@ -228,8 +228,12 @@ end
 --- Reads what the index says about itself.
 local function index_info(handle: Handle): IndexInfo
    return {
-      bytes = C.ts_index_bytes(handle.ptr),
-      terms = C.ts_term_count(handle.ptr),
+      -- The engine answers in 64-bit integers, which LuaJIT hands back as
+      -- int64 cdata. Leaving them alone makes the numbers print with an `LL`
+      -- suffix the moment anything formats them, so they cross as Lua numbers
+      -- here, at the boundary, rather than at every call site.
+      bytes = tonumber(C.ts_index_bytes(handle.ptr)) as integer,
+      terms = tonumber(C.ts_term_count(handle.ptr)) as integer,
       mode = content_mode(handle),
    }
 end

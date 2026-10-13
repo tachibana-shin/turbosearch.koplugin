@@ -80,7 +80,7 @@ package.path = PLUGIN_DIR .. "?.lua;" .. package.path
     package.preload["ui/widget/infomessage"] = loader(widgets)
     package.preload["ui/widget/inputdialog"] = loader(widgets)
     package.preload["ui/widget/menu"] = loader(widgets)
-    package.preload["ui/widget/alertdialog"] = loader(widgets)
+    package.preload["ui/widget/confirmbox"] = loader(widgets)
     package.preload["luasettings"] = loader({
         --- A fresh object per open, the way the real one has a file behind it.
         open = function(_, _path)

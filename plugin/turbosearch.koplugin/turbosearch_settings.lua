@@ -12,7 +12,7 @@
 -- changeable here; "what am I looking for" is the search mode, which is the one
 -- thing this screen does change.
 
-local AlertDialog = require("ui/widget/alertdialog")
+local ConfirmBox = require("ui/widget/confirmbox")
 local DataStorage = require("datastorage")
 local InfoMessage = require("ui/widget/infomessage")
 local Menu = require("ui/widget/menu")
@@ -73,9 +73,9 @@ end
 --- reads it is a database open while the reader is doing something else.
 function Settings:report(settings)
     local plugin = self.main
-    local binding = plugin.binding
+    local binding, bind_err = plugin:engine()
     if not binding then
-        return nil, _("The engine is not loaded.")
+        return nil, bind_err or _("The engine could not be loaded.")
     end
 
     local index_path = settings:readSetting("index_path")
@@ -123,9 +123,10 @@ function Settings:show()
 
     local report, err = self:report(settings)
     if not report then
-        UIManager:show(AlertDialog:new{
+        UIManager:show(ConfirmBox:new{
             title = _("No index"),
             text = err,
+            ok_text = _("Close"),
         })
         return
     end
