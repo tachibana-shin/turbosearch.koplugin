@@ -124,6 +124,27 @@ impl Engine {
         std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
     }
 
+    /// On-disk size of everything the index occupies, including its write-ahead
+    /// log.
+    ///
+    /// [`Self::file_size`] counts only the database file, and after a build the
+    /// log holds a large share of what was written: asking "how much does this
+    /// index cost me" of the database alone understates it by however much of the
+    /// last session was still unmerged. The log is checkpointed away on a clean
+    /// close, so this is what a reader sees *during* and *after* a build, and
+    /// [`Self::file_size`] is what it collapses to once there is no session left.
+    pub fn total_size(&self) -> u64 {
+        let mut total = self.file_size();
+        for suffix in ["-wal", "-shm"] {
+            let mut companion = self.path.clone().into_os_string();
+            companion.push(suffix);
+            if let Ok(meta) = std::fs::metadata(std::path::Path::new(&companion)) {
+                total += meta.len();
+            }
+        }
+        total
+    }
+
     /// Runs an async body to completion on the engine's runtime.
     ///
     /// Visible to the rest of the crate: `storage::book` and

@@ -32,12 +32,16 @@ int ts_content_mode(const ts_index *handle);
 
 char *ts_search(ts_index *handle, const char *query, int *out_count);
 char *ts_search_meta(ts_index *handle, const char *query, int *out_count);
+char *ts_search_regex(ts_index *handle, const char *query, int *out_count);
 char *ts_book_title(ts_index *handle, int book_id);
 char *ts_book_path(ts_index *handle, int book_id);
 
 char *ts_alloc_buffer(size_t len);
 void ts_free(char *ptr);
 const char *ts_last_error(void);
+
+long long ts_index_bytes(const ts_index *handle);
+long long ts_term_count(const ts_index *handle);
 ]])
 
 ------------------------------------------------------------
@@ -57,7 +61,18 @@ local enum Mode
    "FileList"
 end
 
---- Options for a search. Both fields are optional.
+--- How a query is interpreted.
+---
+--- `Text` is a phrase when the query is quoted and a set of terms otherwise,
+--- `Metadata` searches only title, author and series, and `Pattern` treats the
+--- query as a regular expression over the terms in the index.
+local enum SearchMode
+   "Text"
+   "Metadata"
+   "Pattern"
+end
+
+--- Options for a search. All fields are optional.
 local record SearchOptions
    -- Keep at most this many results, the way a reader wants one screen.
    limit: integer
@@ -198,6 +213,53 @@ local function drain(buf: any): {string}
 end
 
 --- Searches book content. Raises on failure.
+---
+--- Bytes is what it occupies on disk with its log, terms is how many distinct
+--- terms it holds, and mode is how much content it stored. On the measured
+--- library those three decide whether a reader is looking at a 0.9 MB file list
+--- or a 163 MB phrase index, so the reader can be told before building one.
+local record IndexInfo
+   bytes: integer
+   terms: integer
+   mode: Mode
+end
+
+
+--- Reads what the index says about itself.
+local function index_info(handle: Handle): IndexInfo
+   return {
+      bytes = C.ts_index_bytes(handle.ptr),
+      terms = C.ts_term_count(handle.ptr),
+      mode = content_mode(handle),
+   }
+end
+
+--- Searches with a regular expression over the terms in the index.
+---
+--- A pattern matching too many terms is refused by the engine rather than
+--- answered, because the list would be long enough that nobody reads it and the
+--- reader would have waited through the whole thing.
+local function search_pattern(handle: Handle, query: string, opts?: SearchOptions): {Hit}
+   local o: SearchOptions = opts or {} as SearchOptions
+   local indirect: any = ffi.new("int[1]")
+   local buf: any = C.ts_search_regex(handle.ptr, query, indirect)
+   if buf == ffi.NULL then
+      error(last_error())
+   end
+   local lines: {string} = drain(buf)
+   local result: {Hit} = {}
+   for _, line in ipairs(lines) do
+      local id, score = line:match("^(%d+)%s+(%d+)$")
+      if id and score then
+         result[#result + 1] = { doc_id = tonumber(id) as integer, score = tonumber(score) as integer }
+      end
+   end
+   if o.limit and o.limit > 0 and #result > o.limit then
+      return table.move(result, 1, o.limit, 1, {} as {Hit})
+   end
+   return result
+end
+
 local function search(handle: Handle, query: string, opts?: SearchOptions): {Hit}
    local o: SearchOptions = opts or {} as SearchOptions
    local indirect: any = ffi.new("int[1]")
@@ -264,6 +326,21 @@ local function book_path(handle: Handle, doc_id: integer): string
    return ffi.string(s)
 end
 
+--- Searches with whichever interpretation the mode asks for.
+---
+--- The dispatch lives here rather than in the caller so that a caller cannot
+--- pass `Pattern` to the phrase path and quietly get a phrase: the three are
+--- different index operations and they are not interchangeable.
+local function search_as(handle: Handle, mode: SearchMode, query: string, opts?: SearchOptions): {Hit}
+   if mode == "Metadata" then
+      return search_meta(handle, query, opts)
+   end
+   if mode == "Pattern" then
+      return search_pattern(handle, query, opts)
+   end
+   return search(handle, query, opts)
+end
+
 return {
    Hit = Hit,
    Mode = Mode,
@@ -280,6 +357,9 @@ return {
 
    search = search,
    search_meta = search_meta,
+   search_as = search_as,
+   search_pattern = search_pattern,
+   index_info = index_info,
    book_title = book_title,
    book_path = book_path,
 

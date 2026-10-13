@@ -8,7 +8,8 @@
 --
 -- Run with: script/lua-test
 
-local PLUGIN = "plugin/turbosearch.koplugin/main.lua"
+local PLUGIN_DIR = "plugin/turbosearch.koplugin/"
+local PLUGIN = PLUGIN_DIR .. "main.lua"
 local INDEX = os.getenv("TS_TEST_INDEX") or "/tmp/opencode/e2e.idx"
 
 local captured = {}
@@ -30,6 +31,10 @@ end
 --- Replaces every KOReader module the plugin requires. The widgets are recorded
 --- rather than drawn, so a test can assert on what would have been displayed.
 local function stub_koreader()
+
+-- The plugin's own modules sit beside main.lua and are required by name, so the
+-- directory has to be on the path before it is loaded.
+package.path = PLUGIN_DIR .. "?.lua;" .. package.path
     -- `package.preload` wants a function per entry, not a table: a plain table
     -- is popped by require and the module is then reported as missing.
     local function loader(module)
@@ -49,6 +54,13 @@ local function stub_koreader()
             else
                 captured.info = args
             end
+            -- The plugin calls through the widget rather than only reading fields,
+            -- so a stub that is a plain table is not enough for the calls the
+            -- dialog path makes.
+            args.getInputText = function(self) return self.input or "" end
+            args.onShowKeyboard = function() end
+            args.onCloseWidget = function() end
+            args.free = function() end
             return args
         end,
     }
@@ -68,6 +80,7 @@ local function stub_koreader()
     package.preload["ui/widget/infomessage"] = loader(widgets)
     package.preload["ui/widget/inputdialog"] = loader(widgets)
     package.preload["ui/widget/menu"] = loader(widgets)
+    package.preload["ui/widget/alertdialog"] = loader(widgets)
     package.preload["luasettings"] = loader({
         --- A fresh object per open, the way the real one has a file behind it.
         open = function(_, _path)
@@ -118,6 +131,10 @@ end
 
 stub_koreader()
 
+-- The plugin's own modules sit beside main.lua and are required by name, so the
+-- directory has to be on the path before it is loaded.
+package.path = PLUGIN_DIR .. "?.lua;" .. package.path
+
 local plugin = dofile(PLUGIN)
 local fake_ui = {
     menu = {
@@ -158,7 +175,29 @@ check("each row has a path to open", first and first.path ~= nil and first.path 
 check("the subtitle names the query",
     captured.menu and captured.menu.subtitle:find("thám tử", 1, true) ~= nil)
 
-io.write("\nmetadata fallback\n")
+io.write("\nsearch modes\n")
+
+-- Book text, and then the other two by switching the setting the settings screen
+-- writes. All three reach the same menu, which is the point: a mode is a choice
+-- about what the query means, not a different result screen.
+local modes = { "Text", "Metadata", "Pattern" }
+for _, mode in ipairs(modes) do
+    -- The phrase is what Text is for, and the Japanese name is what the other
+    -- two are for: it must appear in one under content search and in both under
+    -- metadata or pattern, which is what makes the modes a real choice.
+    local query = mode == "Text" and "thám tử" or "higashino"
+    instance:loadSettings():saveSetting("search_mode", mode)
+    captured.menu = nil
+    instance:search(query)
+    local n = captured.menu and captured.menu.item_table and #captured.menu.item_table or 0
+    check(string.format("mode %s returns rows", mode), n > 0,
+        captured.info and captured.info.text or captured.menu and n or "nothing")
+    check(string.format("mode %s names the query", mode),
+        captured.menu and captured.menu.subtitle
+            and captured.menu.subtitle:find(query, 1, true) ~= nil,
+        captured.menu and captured.menu.subtitle)
+end
+instance:loadSettings():saveSetting("search_mode", "Text")
 
 captured.menu = nil
 instance:search("higashino")

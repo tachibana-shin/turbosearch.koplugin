@@ -23,7 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::index::{Dict, Posting, posting};
-use crate::storage::{Engine, RunResult};
+use crate::storage::{Engine, RunError, RunResult};
 use crate::tokenize;
 
 /// Terms a prefix query may expand to, and the document limit it may reach.
@@ -112,6 +112,86 @@ pub fn expand(dict: &Dict, term: &[u8]) -> (Vec<Vec<u8>>, Status) {
         return (Vec::new(), Status::Empty);
     }
     (out, Status::Ok)
+}
+
+/// Terms a regular expression may match, and the document limit it may reach.
+///
+/// A pattern such as `.*` matches every term in the dictionary, so the cap has
+/// to exist before the first match rather than after it: the point of a cap is to
+/// stop a query that would otherwise take seconds and yield thousands of hits.
+pub const MAX_REGEX_TERMS: usize = 256;
+/// Total document frequency a regular expression may cover.
+///
+/// The other half of the pair: a pattern matching few terms can still cover a
+/// huge number of documents, and it is the documents that make a result useless.
+/// The two caps are not independently testable at unit scale — reaching this one
+/// with a pattern limited to 256 terms needs more than eight hundred documents
+/// in the corpus — so only the term cap is asserted below.
+pub const MAX_REGEX_DOCS: u32 = 200_000;
+
+/// Runs a regular-expression query over the term dictionary.
+///
+/// This is the one query that scans the dictionary rather than seeking into it:
+/// there is no index structure that answers "every term matching this pattern", so
+/// the dictionary is walked and each term tested. That is affordable because the
+/// dictionary is a sorted in-memory slice of about a million terms on the measured
+/// library, and it is not affordable for a pattern with no anchor, which is what
+/// [`MAX_REGEX_TERMS`] stops.
+///
+/// The pattern is folded before it is compiled, because the dictionary is stored
+/// folded: a user typing `Thám` wants what `tham` would match, and testing a
+/// folded term against an unfolded pattern finds nothing.
+/// [`crate::tokenize::normalize`] folds without discarding anything, so the
+/// metacharacters survive it.
+///
+/// Matching is anchored at neither end on purpose: `tham` matches `tham`,
+/// `thamtulungdanh` and anything else containing it, the way prefix expansion
+/// already behaves for a term that is not in the dictionary.
+pub fn search_regex(engine: &Engine, dict: &Dict, pattern: &str) -> RunResult<Vec<Hit>> {
+    let folded = tokenize::normalize(pattern);
+    // A size limit, because the pattern is user input and the matcher will
+    // otherwise allocate as much as it is asked to.
+    let re = regex::RegexBuilder::new(&folded)
+        .size_limit(1 << 16)
+        .dfa_size_limit(1 << 20)
+        .build()
+        .map_err(|e| RunError::Message(format!("regular expression: {e}")))?;
+
+    let mut matched: Vec<Vec<u8>> = Vec::new();
+    let mut docs = 0u32;
+    for i in 0..dict.len() {
+        let term = dict.term(i);
+        // Terms are valid UTF-8 by construction; one that is not is skipped
+        // rather than treated as a match, since the matcher needs a str.
+        let Ok(text) = std::str::from_utf8(term) else {
+            continue;
+        };
+        if !re.is_match(text) {
+            continue;
+        }
+        docs = docs.saturating_add(dict.entry(i).df);
+        if matched.len() >= MAX_REGEX_TERMS || docs > MAX_REGEX_DOCS {
+            return Err(RunError::Message(
+                "regular expression matches too many terms; add an anchor".to_string(),
+            ));
+        }
+        matched.push(term.to_vec());
+    }
+    if matched.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Rarest first, the ordering `search` uses, so the candidate set stays small
+    // and the common terms cost a position check rather than a decode.
+    matched.sort_by_key(|t| dict.get(t).map(|e| e.df).unwrap_or(u32::MAX));
+
+    let postings = union(engine, &matched)?;
+    Ok(postings
+        .into_iter()
+        .map(|(doc_id, score, first_position, entry_idx)| {
+            Hit::new(doc_id, score, first_position, entry_idx)
+        })
+        .collect())
 }
 
 /// Reads every chunk of one term, in order.
@@ -831,5 +911,73 @@ mod tests {
                 .all(|w| w[0].doc_id != w[1].doc_id || w[0].position < w[1].position),
             "positions must strictly ascend within a document"
         );
+    }
+
+    #[test]
+    fn a_regular_expression_matches_terms_by_pattern() {
+        let (_d, e) = engine();
+        let dict = index(&e, CORPUS);
+        // Both tham and tham tu are folded tokens, so a pattern on the stem
+        // reaches every document containing either.
+        let hits = search_regex(&e, &dict, "tham.*").unwrap();
+        let docs: Vec<u32> = hits.iter().map(|h| h.doc_id).collect();
+        assert!(docs.contains(&1), "tham should match: {docs:?}");
+        assert!(docs.contains(&4), "tham should match: {docs:?}");
+    }
+
+    #[test]
+    fn a_regular_expression_is_folded_like_the_index() {
+        let (_d, e) = engine();
+        let dict = index(&e, CORPUS);
+        // The dictionary stores folded terms, so a pattern typed with accents has
+        // to fold too or it matches nothing at all.
+        let accented = search_regex(&e, &dict, "th\u{e1}m.*").unwrap();
+        let plain = search_regex(&e, &dict, "tham.*").unwrap();
+        assert_eq!(
+            accented.len(),
+            plain.len(),
+            "the pattern must be folded before it is compiled"
+        );
+    }
+
+    #[test]
+    fn a_regular_expression_with_no_anchor_is_capped_not_run_to_completion() {
+        let (_d, e) = engine();
+        // The cap is on terms, so a corpus smaller than it proves nothing: on
+        // the four-page one `.*` matches a handful of terms and answers. Index
+        // more distinct terms than the cap allows and the same pattern has to be
+        // refused instead of answered.
+        let wide: Vec<(u32, String)> = (0..(MAX_REGEX_TERMS + 8) as u32)
+            .map(|i| (i, format!("term{i} filler text")))
+            .collect();
+        let wide_refs: Vec<(u32, &str)> =
+            wide.iter().map(|(id, text)| (*id, text.as_str())).collect();
+        let dict = index(&e, &wide_refs);
+
+        let err = search_regex(&e, &dict, ".*").unwrap_err();
+        assert!(
+            err.to_string().contains("too many terms"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_broken_regular_expression_is_reported_not_panicked() {
+        let (_d, e) = engine();
+        let dict = index(&e, CORPUS);
+        for pattern in ["(", "*", "a{2,1}"] {
+            let err = search_regex(&e, &dict, pattern).unwrap_err();
+            assert!(
+                err.to_string().contains("regular expression"),
+                "{pattern} should be reported as a bad pattern, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_regular_expression_matching_nothing_is_empty_rather_than_an_error() {
+        let (_d, e) = engine();
+        let dict = index(&e, CORPUS);
+        assert!(search_regex(&e, &dict, "zzzzz").unwrap().is_empty());
     }
 }

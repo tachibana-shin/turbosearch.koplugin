@@ -16,6 +16,7 @@ quick-xml = "0.37"
 unicode-normalization = "0.1"  # NFD + NFKC for term normalization
 encoding_rs = "0.8"
 memchr = "2"
+regex = "1"
 sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "runtime-tokio", "macros"] }
 tokio = { version = "1.53.2", features = ["rt", "macros"] }
 

@@ -19,11 +19,17 @@ local record CLibrary
    ts_content_mode: function(any): integer
    ts_search: function(any, string, any): any
    ts_search_meta: function(any, string, any): any
+   ts_search_regex: function(any, string, any): any
    ts_book_title: function(any, integer): any
    ts_book_path: function(any, integer): any
    ts_alloc_buffer: function(integer): any
    ts_free: function(any)
    ts_last_error: function(): any
+   -- Bytes of everything the index occupies on disk, log included.
+   ts_index_bytes: function(any): integer
+   -- Distinct terms, which is what separates the three content modes in
+   -- practice more tellingly than the size does.
+   ts_term_count: function(any): integer
 end
 
 local record FfiModule

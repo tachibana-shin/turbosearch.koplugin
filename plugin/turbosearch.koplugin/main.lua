@@ -22,6 +22,7 @@ local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local LuaSettings = require("luasettings")
 local Menu = require("ui/widget/menu")
+local Settings = require("turbosearch_settings")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local ffiUtil = require("ffi/util")
@@ -38,6 +39,8 @@ local MAX_RESULTS = 200
 local DEFAULT_SETTINGS = {
     index_path = DataStorage:getDataDir() .. "/search/turbosearch.db",
     last_query = "",
+    -- How the query is read: book text, book details, or a pattern.
+    search_mode = "Text",
 }
 
 local Turbosearch = WidgetContainer:extend{
@@ -155,6 +158,23 @@ function Turbosearch:addToMainMenu(menu_items)
             self:onTurbosearchSearch()
         end,
     }
+    menu_items.turbosearch_settings = {
+        text = _("Book search settings"),
+        sorting_hint = "more_tools",
+        callback = function()
+            self:onTurbosearchSettings()
+        end,
+    }
+end
+
+--- Opens the settings screen.
+---
+--- A separate entry point rather than a branch of the search one, so a reader
+--- who wants to know what an index holds does not have to dismiss a query box to
+--- find out.
+function Turbosearch:onTurbosearchSettings()
+    local settings = Settings:new{ main = self }
+    settings:show()
 end
 
 --- Shows the query box, pre-filled with the last query so a follow-up search
@@ -175,7 +195,15 @@ function Turbosearch:onTurbosearchSearch()
                     end,
                 },
                 {
+                    text = _("Settings"),
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:onTurbosearchSettings()
+                    end,
+                },
+                {
                     text = _("Search"),
+                    is_enter_default = true,
                     callback = function()
                         local query = dialog:getInputText()
                         UIManager:close(dialog)
@@ -264,20 +292,21 @@ end
 --- the result is reported as nothing. Returns the hits plus a phrase saying
 --- where they came from, or nil plus an error message.
 function Turbosearch:query(binding, handle, query)
-    local ok, hits = pcall(binding.search, handle, query)
+    -- The mode is the reader's, and it is dispatched inside the binding so the
+    -- caller cannot send a pattern to the phrase path and quietly get a phrase.
+    local mode = self:loadSettings():readSetting("search_mode") or "Text"
+    local how = _("found in book text")
+    if mode == "Metadata" then
+        how = _("matching title or author")
+    elseif mode == "Pattern" then
+        how = _("matching a pattern")
+    end
+
+    local ok, hits = pcall(binding.search_as, handle, mode, query)
     if not ok then
         return nil, tostring(hits)
     end
-    if #hits > 0 then
-        return hits, _("found in book text")
-    end
-
-    local ok2, meta = pcall(binding.search_meta, handle, query)
-    if ok2 and #meta > 0 then
-        return meta, _("matching title or author")
-    end
-
-    return {}, _("nothing found")
+    return hits, how
 end
 
 function Turbosearch:countText(count)

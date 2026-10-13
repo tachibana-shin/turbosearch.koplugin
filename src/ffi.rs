@@ -264,6 +264,97 @@ pub unsafe extern "C" fn ts_search(
     }
 }
 
+/// Searches content with a regular expression over the term dictionary.
+///
+/// The pattern is matched against the stored terms, which are folded, so a query
+/// typed with accents reaches what the unaccented form would. A pattern matching
+/// too many terms is refused rather than run: the answer would be a list nobody
+/// reads, and a reader waiting through it.
+///
+/// # Safety
+/// `handle` must come from [`ts_open`]; `query` must be a null-terminated UTF-8
+/// string or null; `out_count` must be writable when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_search_regex(
+    handle: *mut TsIndex,
+    query: *const c_char,
+    out_count: *mut c_int,
+) -> *mut c_char {
+    unsafe {
+        let Some(handle) = as_ref(handle) else {
+            return err_ret("ts_search_regex: null handle", out_count);
+        };
+        let Some(q) = to_str(query) else {
+            return err_ret("ts_search_regex: null or empty query", out_count);
+        };
+
+        match panic::catch_unwind(AssertUnwindSafe(|| regex_impl(handle, q))) {
+            Ok(Ok((buffer, count))) => {
+                clear_error();
+                if !out_count.is_null() {
+                    *out_count = count;
+                }
+                buffer
+            }
+            Ok(Err(e)) => err_ret(&format!("ts_search_regex: {e}"), out_count),
+            Err(_) => err_ret("ts_search_regex: panicked", out_count),
+        }
+    }
+}
+
+fn regex_impl(handle: &TsIndex, query: &str) -> crate::storage::RunResult<(*mut c_char, c_int)> {
+    let result = query::search_regex(handle.engine, &handle.dict, query)?;
+    let buffer = lines_buffer(result.iter().map(|h| (h.doc_id, h.score)));
+    Ok((buffer, result.len() as c_int))
+}
+
+/// The size of the index on disk, in bytes, or a negative error code.
+///
+/// Reported separately from the open calls because it is the number a reader
+/// wants before deciding to build one: the difference between the three content
+/// modes is a factor of a hundred, so "how much will this cost me" is a
+/// question the reader can only answer after opening an index. Reading it does
+/// not need a database at all, so the handle is not required.
+///
+/// # Safety
+/// `handle` must come from [`ts_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_index_bytes(handle: *mut TsIndex) -> i64 {
+    unsafe {
+        let Some(handle) = as_ref(handle) else {
+            set_error("ts_index_bytes: null handle");
+            return TS_ERR_ARGUMENT as i64;
+        };
+        let bytes = handle.engine.total_size();
+        match i64::try_from(bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                set_error("ts_index_bytes: index larger than a 64-bit integer");
+                TS_ERR_QUERY as i64
+            }
+        }
+    }
+}
+
+/// The number of distinct terms in the index, or a negative error code.
+///
+/// Together with [`ts_index_bytes`] this is what a progress dialog would need,
+/// and what tells a reader whether an index is `files`, `terms` or `full`
+/// before the first query rather than after it.
+///
+/// # Safety
+/// `handle` must come from [`ts_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_term_count(handle: *mut TsIndex) -> i64 {
+    unsafe {
+        let Some(handle) = as_ref(handle) else {
+            set_error("ts_term_count: null handle");
+            return TS_ERR_ARGUMENT as i64;
+        };
+        i64::try_from(handle.dict.len()).unwrap_or(i64::MAX)
+    }
+}
+
 fn search_impl(handle: &TsIndex, query: &str) -> crate::storage::RunResult<(*mut c_char, c_int)> {
     let result = query::search_phrase(handle.engine, &handle.dict, query)?;
     let buffer = lines_buffer(result.iter().map(|h| (h.doc_id, h.score)));
