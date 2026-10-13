@@ -21,8 +21,12 @@ PLATFORMS = {
         "The desktop reader, and any x86-64 machine",
     ),
     "kindle": (
+        "arm-unknown-linux-gnueabi",
+        "Kindle, soft-float ABI — what a Paperwhite 3's firmware uses",
+    ),
+    "kindlehf": (
         "armv7-unknown-linux-gnueabihf",
-        "Kindle Paperwhite 3, ARMv7 hard-float",
+        "Kindle, hard-float ABI",
     ),
     "aarch64": (
         "aarch64-unknown-linux-gnu",
@@ -30,7 +34,6 @@ PLATFORMS = {
     ),
 }
 
-# The prefix every archive starts with, and the one it does not.
 ARCHIVE_PREFIX = "turbosearch-"
 ARCHIVE_SUFFIX = ".zip"
 

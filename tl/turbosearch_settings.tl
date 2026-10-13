@@ -12,6 +12,8 @@
 --- for the one they want finds it by shape before reading any text.
 
 local ButtonDialog = require("ui/widget/buttondialog")
+local CheckButton = require("ui/widget/checkbutton")
+local InputDialog = require("ui/widget/inputdialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local InfoMessage = require("ui/widget/infomessage")
 local UIManager = require("ui/uimanager")
@@ -40,6 +42,20 @@ local record SettingsFile
    readSetting: function(SettingsFile, string, any): any
    saveSetting: function(SettingsFile, string, any)
    flush: function(SettingsFile)
+end
+
+--- The settings dialog, and the calls made through it.
+local record SettingsDialog
+   getInputText: function(SettingsDialog): string
+   addWidget: function(SettingsDialog, any)
+   onShowKeyboard: function(SettingsDialog)
+end
+
+--- One option checkbox, and the state it holds.
+local record OptionBox
+   text: string
+   checked: boolean
+   parent: any
 end
 
 local record SettingsHost
@@ -97,13 +113,6 @@ local function content_short(mode: string): string
       return _("Terms, no positions")
    end
    return _("Full text")
-end
-
--- The search modes, as a reader chooses between them.
-local record ModeOption
-   mode: string
-   text: string
-   help: string
 end
 
 local record Settings
@@ -228,58 +237,61 @@ function Settings:show()
    UIManager:show(dialog)
 end
 
--- Chooses what the query means.
----
--- A popup with a row per option rather than a dialog with a keyboard: three
--- choices and no typing, so the control is three buttons and the current one is
--- marked by weight. Tapping one applies it and comes back here, which keeps the
--- reader looking at the same popup they already understood.
-function Settings:choose_mode()
+-- Everything the plugin can be told to do differently.
+--
+-- The options that used to be a mode picker are now checkboxes on the search popup,
+--- where a reader already is, so what is left here is the configuration: which index
+--- to read, and what the checkboxes start out as next time.
+--
+--- A text field, two checkboxes, and Save, in one popup, because the settings are a
+--- handful of values and not a tree.
+function Settings:configure()
    local settings: SettingsFile = (self.main as SettingsHost):loadSettings()
-   local current: string = settings:readSetting("search_mode", "Text") as string
 
-   local dialog: any
+   --- The two options, declared before the dialog that closes over them.
+   local metadata_box: OptionBox
+   local pattern_box: OptionBox
 
-   --- The rows are built before the popup is, because the current option is marked
-   --- by weight and that depends on a setting read at run time.
-   local rows: {any} = {}
-   local options: {ModeOption} = {
-      { mode = "Text", text = _("Book text"),
-        help = _("phrases in quotes match exactly") },
-      { mode = "Metadata", text = _("Title, author, series"),
-        help = _("skip the book contents") },
-      { mode = "Pattern", text = _("Regular expression"),
-        help = _("over the terms in the index") },
-   }
-
-   for _, option in ipairs(options) do
-      rows[#rows + 1] = {
+   local dialog: SettingsDialog
+   dialog = InputDialog:new{
+      title = _("Book search settings"),
+      input = settings:readSetting("index_path", "") as string,
+      description = _("The index to read, built by the `indexer` tool in this repository."),
+      buttons = {
          {
-            text = option.text .. "  " .. option.help,
-            text_font_bold = option.mode == current,
-            callback = function()
-               settings:saveSetting("search_mode", option.mode)
-               settings:flush()
-               self:show()
-            end,
+            {
+               text = _("Save"),
+               callback = function()
+                  settings:saveSetting("index_path", dialog:getInputText())
+                  settings:saveSetting("opt_metadata", metadata_box.checked)
+                  settings:saveSetting("opt_pattern", pattern_box.checked)
+                  settings:flush()
+                  UIManager:close(dialog)
+                  self:show()
+               end,
+            },
          },
-      }
-   end
-   rows[#rows + 1] = {
-      {
-         text = _("Close"),
-         callback = function()
-            UIManager:close(dialog)
-         end,
       },
-   }
+   } as SettingsDialog
 
-   dialog = ButtonDialog:new{
-      title = _("What should the query mean?") .. "\n\n"
-         .. _("Now") .. ": " .. mode_short(current),
-      buttons = rows,
-   } as any
+   --- Each checkbox is an option the popup carries, so what it starts as next time
+   --- is part of the configuration rather than a thing to remember.
+   metadata_box = CheckButton:new{
+      text = _("Metadata only"),
+      checked = settings:readSetting("opt_metadata", false) as boolean,
+      parent = dialog,
+   } as OptionBox
+   dialog:addWidget(metadata_box)
+
+   pattern_box = CheckButton:new{
+      text = _("Regular expression"),
+      checked = settings:readSetting("opt_pattern", false) as boolean,
+      parent = dialog,
+   } as OptionBox
+   dialog:addWidget(pattern_box)
+
    UIManager:show(dialog)
+   dialog:onShowKeyboard()
 end
 
 return Settings

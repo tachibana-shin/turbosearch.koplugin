@@ -3,6 +3,9 @@ local record DialogButton
    text: string
    callback: function()
    is_enter_default: boolean
+   --- A name from the reader's own icon set, which renders in the reader's style
+   --- rather than as a placeholder.
+   icon: string
 end
 
 local record InputDialogArgs
@@ -15,6 +18,9 @@ local record InputDialogArgs
    --- more, and a caller reaching past this gets an error naming the field.
    getInputText: function(InputDialogArgs): string
    onShowKeyboard: function(InputDialogArgs)
+   --- Puts a widget between the input and the buttons, which is where the
+   --- reader's own find box puts its "case sensitive" checkbox.
+   addWidget: function(InputDialogArgs, any)
 end
 
 local record InputDialogModule

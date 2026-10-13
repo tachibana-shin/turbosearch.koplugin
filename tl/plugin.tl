@@ -15,6 +15,7 @@ local DataStorage = require("datastorage")
 local Dispatcher = require("dispatcher")
 local FileManager = require("apps/filemanager/filemanager")
 local InfoMessage = require("ui/widget/infomessage")
+local CheckButton = require("ui/widget/checkbutton")
 local InputDialog = require("ui/widget/inputdialog")
 local LuaSettings = require("luasettings")
 local Menu = require("ui/widget/menu")
@@ -70,20 +71,19 @@ local function plugin_dir(): string
    return (source:match("(.*/)") or "./")
 end
 
---- The engine library for the architecture LuaJIT is running on.
+--- The engine library, always under one name.
 ---
---- Both are built beside the plugin — the host library for the desktop reader and
---- the armv7 one for the device — and which one loads is decided from the
---- interpreter rather than from whichever file was left there last. An x86-64
---- library on a Kindle fails at ffi.load with a message about the ELF class, so
---- choosing by name is what keeps that from being a search rather than a load
---- error.
-local function engine_name(): string
-   if jit.arch == "arm" then
-      return "libturbosearch-armv7.so"
-   end
-   return "libturbosearch.so"
-end
+--- A release is built per platform and each contains a `libturbosearch.so` for that
+--- platform, so there is one file in the plugin directory and nothing to choose
+--- between. LuaJIT loads it, and if the wrong one is there it fails at `ffi.load`
+-- with a message about the ELF class, which is the honest outcome — a reader that
+--- got the wrong archive finds out at once.
+---
+--- LuaJIT was *not* asked to tell the two ARM ABIs apart, which an earlier draft had
+--- it doing: it reports `arm` for soft- and hard-float alike, so the choice would
+--- have been a guess at the reader's firmware. Which binary to ship is the job of
+--- whoever picks the platform, not of the code that loads it.
+local ENGINE_LIBRARY: string = "libturbosearch.so"
 
 -- Maximum rows this menu will build. Beyond this the page takes longer to render
 -- than a reader is willing to sit still for, and someone looking for a book is
@@ -109,6 +109,18 @@ local record SettingsFile
    flush: function(SettingsFile)
 end
 
+--- One option checkbox, and the state it holds.
+---
+--- Declared here rather than taken from the stub, for the reason `QueryDialog` is:
+--- a module cannot lend its types to the module that requires it, and a list of
+--- `any` cannot be indexed — which is what this needs to do when the Search button
+--- reads the boxes back.
+local record OptionBox
+   text: string
+   checked: boolean
+   parent: any
+end
+
 --- The query box, and the two calls made through it.
 ---
 --- Declared here for the reason the binding's interface is, so the cast at the
@@ -119,6 +131,7 @@ local record QueryDialog
    input_hint: string
    getInputText: function(QueryDialog): string
    onShowKeyboard: function(QueryDialog)
+   addWidget: function(QueryDialog, any)
 end
 
 --- The settings file, opened once.
@@ -158,16 +171,20 @@ local record Turbosearch
    fullname: string
    ui: UiModule
    result_menu: any
+   --- The option checkboxes the popup is showing, if any. Held here rather than in
+   --- a local so the callback that reads them can reach them.
+   option_boxes: {OptionBox}
 
    init: function(Turbosearch)
    loadSettings: function(Turbosearch): SettingsFile
    engine: function(Turbosearch): EngineBinding
+   readSearchOptions: function(Turbosearch): {string: any}
    onDispatcherRegisterActions: function(Turbosearch)
    addToMainMenu: function(Turbosearch, {string: any})
    onTurbosearchSearch: function(Turbosearch)
    onTurbosearchSettings: function(Turbosearch)
-   search: function(Turbosearch, string)
-   query: function(Turbosearch, EngineBinding, any, string): {Hit}, string
+   search: function(Turbosearch, string, {string: any})
+   query: function(Turbosearch, EngineBinding, any, string, {string: any}): {Hit}, string
    count_text: function(Turbosearch, integer): string
    showEmpty: function(Turbosearch, string)
    openBook: function(Turbosearch, string)
@@ -224,7 +241,7 @@ local engine_error: string = ""
 --- value keeps the caller's shape the same either way: the binding, or nil.
 function Turbosearch:engine(): EngineBinding
    if not binding.is_loaded() then
-      local library: string = plugin_dir() .. engine_name()
+      local library: string = plugin_dir() .. ENGINE_LIBRARY
       local ok: boolean
       local load_err: any
       ok, load_err = pcall(binding.load_lib, library)
@@ -277,9 +294,11 @@ end
 --- one edit away.
 function Turbosearch:onTurbosearchSearch()
    local settings = self:loadSettings()
+
+   -- The query box, the options, and the two buttons — one screen, in the order a
+   --- reader works through them: what am I looking for, what kind of a search is
+   --- it, go.
    local dialog: QueryDialog
-   -- The stub's own type and this file's are the same object at run time and two
-   -- different names to the checker; the cast is what joins them.
    dialog = InputDialog:new{
       title = _("Search in books"),
       input = settings:readSetting("last_query", "") as string,
@@ -292,8 +311,11 @@ function Turbosearch:onTurbosearchSearch()
                   UIManager:close(dialog)
                end,
             },
+         },
+         {
             {
                text = _("Settings"),
+               icon = "appbar.settings",
                callback = function()
                   UIManager:close(dialog)
                   self:onTurbosearchSettings()
@@ -301,25 +323,83 @@ function Turbosearch:onTurbosearchSearch()
             },
             {
                text = _("Search"),
+               icon = "appbar.search",
                is_enter_default = true,
                callback = function()
                   local query: string = dialog:getInputText()
+                  -- The options are read before the dialog closes, because closing
+                  --- it drops the widgets the state lives on.
+                  local opts: {string: any} = self:readSearchOptions()
                   UIManager:close(dialog)
-                  self:search(query)
+                  self:search(query, opts)
                end,
             },
          },
       },
    } as QueryDialog
+
+   -- Each option is a checkbox below the input, and each one is a separate index
+   --- operation rather than a strength setting, so none of them is a radio group
+   --- and more than one can be on. The last one wins in the dispatch, which is
+   --- stated on the label rather than left to be discovered.
+   local meta_box = CheckButton:new{
+      text = _("Metadata only — skip the book contents"),
+      checked = settings:readSetting("opt_metadata", false) as boolean,
+      parent = dialog,
+   }
+   dialog:addWidget(meta_box)
+
+   local pattern_box = CheckButton:new{
+      text = _("Regular expression — over the terms"),
+      checked = settings:readSetting("opt_pattern", false) as boolean,
+      parent = dialog,
+   }
+   dialog:addWidget(pattern_box)
+
+   Turbosearch.option_boxes = { meta_box, pattern_box } as {OptionBox}
    UIManager:show(dialog)
    dialog:onShowKeyboard()
+end
+
+--- Reads the option checkboxes, and remembers them for the next search.
+---
+--- Remembered rather than reset, because a reader who looks for an author once
+--- looks for another author next time, and the box being where they left it is the
+--- difference between one tap and three.
+function Turbosearch:readSearchOptions(): {string: any}
+   local settings = self:loadSettings()
+   --- The boxes, or an empty list — which is what a call from the settings screen
+   --- rather than the popup looks like.
+   local boxes: {OptionBox} = Turbosearch.option_boxes or ({} as {OptionBox})
+   local metadata: boolean = settings:readSetting("opt_metadata", false) as boolean
+   local pattern: boolean = settings:readSetting("opt_pattern", false) as boolean
+   if boxes[1] then
+      metadata = boxes[1].checked
+   end
+   if boxes[2] then
+      pattern = boxes[2].checked
+   end
+   settings:saveSetting("opt_metadata", metadata)
+   settings:saveSetting("opt_pattern", pattern)
+   settings:flush()
+
+   -- Which mode the two boxes amount to. Metadata first, because it is the narrower
+   --- question: a pattern over an index that was never searched for text is a way of
+   --- finding nothing slowly.
+   local mode: string = "Text"
+   if metadata then
+      mode = "Metadata"
+   elseif pattern then
+      mode = "Pattern"
+   end
+   return { mode = mode, metadata = metadata, pattern = pattern }
 end
 
 --- Runs a query and shows the results, or the reason there are none.
 ---
 --- Rows are built while the handle is open and closed before the menu is shown, so
 --- no handle has to outlive the search that opened it.
-function Turbosearch:search(raw_query: string)
+function Turbosearch:search(raw_query: string, opts?: {string: any})
    local query: string = raw_query:gsub("^%s+", ""):gsub("%s+$", "")
    if query == "" then
       return
@@ -349,7 +429,7 @@ function Turbosearch:search(raw_query: string)
 
    -- The engine raises rather than returning an error, so every call is guarded:
    -- pcall keeps a bad query from taking the reader down.
-   local hits, how = self:query(engine, handle, query)
+   local hits, how = self:query(engine, handle, query, opts)
    if not hits then
       engine.close(handle)
       UIManager:show(InfoMessage:new{ text = how })
@@ -397,8 +477,10 @@ end
 --- phrase path and quietly get a phrase: the three are separate index operations,
 --- not one operation with a flag. Returns the hits plus a phrase saying where they
 --- came from, or nil plus an error message.
-function Turbosearch:query(engine: EngineBinding, handle, query: string): {Hit}, string
-   local mode: string = self:loadSettings():readSetting("search_mode", "Text") as string
+function Turbosearch:query(engine: EngineBinding, handle, query: string,
+                           opts?: {string: any}): {Hit}, string
+   local chosen: {string: any} = opts or {} as {string: any}
+   local mode: string = (chosen.mode or "Text") as string
    local how = _("found in book text")
    if mode == "Metadata" then
       how = _("matching title or author")

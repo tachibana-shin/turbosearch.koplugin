@@ -61,6 +61,10 @@ package.path = PLUGIN_DIR .. "?.lua;" .. package.path
             -- dialog path makes.
             args.getInputText = function(self) return self.input or "" end
             args.onShowKeyboard = function() end
+            --- Widgets added by addWidget are collected, so a test can read the
+            --- checkboxes the plugin put on the screen.
+            args.added = {}
+            args.addWidget = function(self, w) table.insert(self.added, w) end
             args.onCloseWidget = function() end
             args.free = function() end
             return args
@@ -80,6 +84,7 @@ package.path = PLUGIN_DIR .. "?.lua;" .. package.path
         openFile = function(_, file) captured.opened = file end,
     })
     package.preload["ui/widget/infomessage"] = loader(widgets)
+    package.preload["ui/widget/checkbutton"] = loader(widgets)
     package.preload["ui/widget/inputdialog"] = loader(widgets)
     package.preload["ui/widget/menu"] = loader(widgets)
     package.preload["ui/widget/confirmbox"] = loader(widgets)
@@ -161,6 +166,30 @@ captured.menu = nil
 instance:onTurbosearchSearch()
 check("the dialog opens pre-filled with the last query", captured.dialog ~= nil)
 check("the dialog has input", captured.dialog and captured.dialog.input ~= nil)
+
+--- The options the popup carries. Each is a checkbox under the input, and the
+--- reader reads them back when Search is pressed.
+local boxes = captured.dialog and captured.dialog.added or {}
+check("the popup shows an option per index operation", #boxes == 2,
+    #boxes .. " boxes")
+local texts = {}
+for _, box in ipairs(boxes) do texts[box.text] = true end
+check("metadata is one of the options",
+    texts["Metadata only — skip the book contents"] == true, texts)
+check("a regular expression is one of the options",
+    texts["Regular expression — over the terms"] == true, texts)
+
+--- The buttons: settings on the left, search on the right, each with an icon.
+local row = captured.dialog and captured.dialog.buttons
+    and captured.dialog.buttons[2] or {}
+check("settings and search are two buttons in one row", #row == 2, #row)
+check("settings is on the left", row[1] and row[1].text == "Settings",
+    row[1] and row[1].text)
+check("search is on the right", row[2] and row[2].text == "Search",
+    row[2] and row[2].text)
+check("both carry an icon from the reader's set",
+    row[1] and row[1].icon ~= nil and row[2] and row[2].icon ~= nil,
+    row[1] and row[1].icon)
 
 captured.menu = nil
 instance:search("thám tử")

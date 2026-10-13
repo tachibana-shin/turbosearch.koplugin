@@ -35,7 +35,8 @@ plugins:
       {
         "assets": [
           { "path": "build/turbosearch-desktop-${nextRelease.version}.zip", "label": "Desktop (Linux) build" },
-          { "path": "build/turbosearch-kindle-${nextRelease.version}.zip", "label": "Kindle Paperwhite 3 build" },
+          { "path": "build/turbosearch-kindle-${nextRelease.version}.zip", "label": "Kindle (soft floats) build" },
+          { "path": "build/turbosearch-kindlehf-${nextRelease.version}.zip", "label": "Kindle (hard floats) build" },
           { "path": "build/turbosearch-aarch64-${nextRelease.version}.zip", "label": "AArch64 build" },
           { "path": "build/turbosearch.json", "label": "Plugin manifest" }
         ],

@@ -51,41 +51,51 @@ a Kindle has neither the space for 163 MB nor the patience for 114 s, and
 cargo build --release
 ```
 
-Cross-compiling for the device:
+Cross-compiling goes through `cross`, which puts each target in a container
+carrying that target's own sysroot and linker. One way to ask for a target and
+get the same answer everywhere, rather than whichever cross gcc happened to be
+installed:
 
 ```sh
-rustup target add armv7-unknown-linux-gnueabihf
-cargo zigbuild --target armv7-unknown-linux-gnueabihf --release
+make plugin PLATFORM=kindlea9
 ```
 
-`cargo zigbuild` rather than an arm gcc cross-compiler, because there is no
-`arm-linux-gnueabihf-gcc` on every machine that has `zig`; both produce the same
-ELF 32-bit ARM EABI5 object, and the resulting `.so` needs only `libc`,
-`libpthread` and `libdl` — SQLite is compiled in, so there is no
-`libsqlite3` to install on the device.
+`cross` needs a container engine. podman works, and the Makefile sets
+`CROSS_CONTAINER_ENGINE=podman` explicitly rather than leaving it to be guessed.
+The resulting `.so` needs only `libc`, `libpthread` and `libdl` — SQLite is
+compiled in, so there is no `libsqlite3` to install on the device.
 
 ## The KOReader plugin
 
-The plugin searches the library from inside the reader: a query box prefilled
-with the last query, a results menu carrying each book's title, and a tap opens
-the book. Beside **Search** in that box is a **Settings** button, and there is a
-second menu entry for it, so a reader can find out what an index holds without
-dismissing a query first.
+The plugin searches the library from inside the reader. One popup, in the order a
+reader works through it — what am I looking for, what kind of search is it, go:
 
-The settings screen reports the index it points at, its size on disk including
-the write-ahead log, its term count and its content mode, and lets the reader
-choose what the query means:
+```
+┌─ Search in books ────────────────┐
+│ the last query                   │
+│                                  │
+│ ☐ Metadata only                  │
+│ ☐ Regular expression             │
+│                                  │
+│ [⚙ Settings]      [🔍 Search]   │
+└──────────────────────────────────┘
+```
 
-| Mode | Reads the query as |
-|---|---|
-| `Text` | book text, with `"quoted"` phrases matching exactly |
-| `Metadata` | title, author and series only |
-| `Pattern` | a regular expression over the terms in the index |
+Each box is a separate index operation rather than a strength setting, so more
+than one can be ticked and the last one wins — which is said on the label rather
+than left to be discovered. The boxes start where the reader left them last time,
+because a reader who looks for an author once looks for another author next.
 
-A content mode that cannot do what the chosen mode asks is said out loud rather
-than discovered by typing: a `files` index has no text to search, and a `terms`
-index has nothing for a phrase to match.
+A tap opens the book. The results menu carries each book's title and its format
+on the right, where the reader's own file browser puts it.
 
+**Settings** (left of the group, or the second menu entry) is everything the
+plugin can be told to do differently: which index to read, and what those two
+checkboxes start out as. Its first screen also reports what the index holds — its
+size on disk including the write-ahead log, its term count, and its content mode —
+and says out loud when a content mode cannot do what the search asks: a `files`
+index has no text to search, and a `terms` index has nothing for a phrase to
+match.
 There is no case-sensitivity setting, and not by omission. The index stores
 folded terms, so a query never had a case to be sensitive to; giving it one would
 mean storing the original alongside every term, doubling an index whose size the
@@ -98,25 +108,36 @@ make install                  # point KOReader at it
 make packages                 # one release archive per platform, in build/
 ```
 
-The two libraries sit in `plugin/turbosearch.koplugin/` side by side and the
-plugin picks between them from `jit.arch`, so an x86-64 build cannot end up on a
-Kindle pretending to work. To use the plugin, symlink it the way the other
-plugins on the machine are:
+There is no `plugin/` directory in the repository. Everything the reader loads —
+the plugin's Lua, its metadata, and the engine library — is generated into
+`build/turbosearch.koplugin/` from the Teal sources in `tl/`, and the whole
+directory is a build output:
 
 ```sh
-ln -s "$PWD/plugin/turbosearch.koplugin" \
-      ~/.config/koreader/plugins/turbosearch.koplugin
+make plugin                   # build for this machine
+make plugin PLATFORM=kindlea9 # or any platform in the table below
+make install                  # symlink it into ~/.config/koreader/plugins
 ```
+
+`make install` links it the way the other plugins on the machine are linked, so it
+is one directory on disk rather than a copy that has to be kept in step. Keeping
+the plugin directory under version control, with Lua in it that is also generated
+from Teal, put the generated files one commit away from the sources they are
+compiled from.
+
+One engine library per platform sits in that directory, and the plugin picks
+between them from `jit.arch`. An x86-64 library reaching a Kindle fails at
+`ffi.load` with a message about the ELF class, so choosing by name is what keeps
+that from being a search that returns nothing rather than a load that says why.
 
 The plugin only reads an index — building one takes minutes and writes hundreds
 of megabytes, which is not something to do from a menu callback:
 
 ```sh
-cargo run --release --bin indexer -- /path/to/library /path/to/turbosearch.db
+make build && cargo run --release --bin indexer -- <library> <db>
 CONTENT_MODE=full cargo run --release --bin indexer -- <library> <db>  # phrase queries
 ```
-
-Point the plugin at it in the reader's settings for the plugin.
+Point the plugin at the index in the reader's settings for the plugin.
 
 ## Lua toolchain
 
@@ -167,6 +188,36 @@ TURBOSEARCH_PROBE=1 /usr/lib/koreader/koreader.sh 2>&1 | grep PROBE
 On a 619-book-corpus index built from 614 EPUBs, that printed 33 hits for a
 Vietnamese phrase, 13 metadata matches, 33 rows with every title resolved, the
 real `Menu` accepted, and a book opened in 0.275 s.
+
+## Releases
+
+`make packages` builds the engine for each platform with `cross`, and packs a
+separate archive per platform into `build/`. Each holds the plugin's Lua, its
+metadata, and the one engine library that platform needs — because the
+alternative, one archive carrying every architecture, ships libraries that are
+dead weight on any given reader.
+
+| Platform | Target | For |
+|---|---|---|
+| `desktop` | `x86_64-unknown-linux-musl` | the desktop reader, and any x86-64 machine |
+| `kindle` | `arm-unknown-linux-musleabi` | Kindle, soft-float ABI, no SoC tuning |
+| `kindlea9` | `arm-unknown-linux-musleabi` + `target-cpu=cortex-a9` | **Kindle Paperwhite 3** |
+| `kindlehf` | `arm-unknown-linux-musleabihf` | Kindle whose toolchain uses the hard-float ABI |
+| `aarch64` | `aarch64-unknown-linux-musl` | newer readers with a 64-bit ARM |
+
+Every Linux target is musl rather than gnu. A `.so` linked against the build
+machine's glibc is linked against a version the reader does not have, and the
+failure is a reader that loads the plugin and then finds no engine; musl carries
+its own. The Paperwhite 3 is soft-float even on ARMv7, which is why `kindlea9`
+and `kindle` share a target and `kindlea9` exists only for the SoC tuning.
+
+`build/turbosearch.json` indexes them: which archive is which platform, the target
+it was built for, its size, and a sha256. Attached to a release so a script — or a
+reader deciding whether to redeploy — can tell what it has without unpacking
+anything.
+
+Releases are semantic-release, driven by commit messages, attaching one archive
+per platform (`.releaserc.yaml`, shaped after the rakuyomi plugin's).
 
 ## Tests
 
