@@ -1,21 +1,19 @@
 -- Settings, and everything the engine can be asked about itself.
 --
--- Kept apart from main.lua because it is the half of the plugin that is read
--- most and changed most, and because it is the only part that talks to more than
--- one index at a time: a reader switching an index needs the full report of
--- where it points before the switch takes effect, and a file browser is not the
--- place to discover that the old index is still the one being read.
+-- Kept apart from main.lua because it talks to an index rather than to a book, and
+-- because it is the half a reader arrives at wanting an answer rather than a
+-- search.
 --
--- The tabs follow the question a reader actually arrives with. "What have I got"
--- is answered by the index it points at, its size and its terms; "what can it
--- do" is the content mode, which is decided by whoever built the index and not
--- changeable here; "what am I looking for" is the search mode, which is the one
--- thing this screen does change.
+-- A popup, not a menu: every other plugin on this reader shows its settings as
+-- one, and with reason — the settings are something to glance at, act on and be
+-- rid of, and a full-screen list is the wrong shape for five lines of
+-- information. The report sits in the title where a popup puts what it is about,
+-- and each button carries an icon, so a reader scanning for the one they want
+-- finds it by shape before reading any text.
 
+local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
-local DataStorage = require("datastorage")
 local InfoMessage = require("ui/widget/infomessage")
-local Menu = require("ui/widget/menu")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local ffiUtil = require("ffi/util")
@@ -26,11 +24,21 @@ local Settings = WidgetContainer:extend{
     name = "turbosearch_settings",
 }
 
+--- Icons, from KOReader's own set.
+---
+--- Named rather than inlined because the set is the reader's: an icon that ships
+--- with KOReader renders in whatever style the reader is using, and one that does
+--- not shows as a placeholder.
+local ICON_SEARCH = "appbar.search"
+local ICON_SETTINGS = "appbar.settings"
+local ICON_FOLDER = "appbar.filebrowser"
+local ICON_CLOSE = "close"
+
 --- Sizes a byte count in a unit a reader can act on.
 ---
---- Bytes with no unit are what a directory listing gives and what nobody can
---- act on: the difference between the three content modes is a factor of a
---- hundred, so the unit is what makes the number a decision.
+--- Bytes with no unit are what a directory listing gives and what nobody can act
+--- on: the difference between the three content modes is a factor of a hundred, so
+--- the unit is what turns the number into a decision.
 local function format_bytes(bytes)
     if bytes < 1024 then
         return T(_("%1 B"), bytes)
@@ -43,34 +51,34 @@ end
 
 --- Describes the search mode the way the query box's hint does.
 ---
---- The three are separate index operations, not one operation with a flag, so
---- the label has to say which rather than describe a level of "strength".
-local function mode_label(mode)
+--- The three are separate index operations, not one operation with a strength, so
+--- the label says which rather than implying the others are weaker.
+local function mode_short(mode)
     if mode == "Metadata" then
-        return _("Title, author and series only")
+        return _("Title, author, series")
     end
     if mode == "Pattern" then
-        return _("Regular expression over the terms")
+        return _("Pattern")
     end
-    return _("Book text (phrases in quotes)")
+    return _("Book text")
 end
 
---- Describes how much content the index holds, and what it costs.
-local function content_label(mode, search_mode)
+--- Describes how much content the index holds.
+local function content_short(mode)
     if mode == "FileList" then
-        return _("File list only — nothing to search inside")
+        return _("File list only")
     end
     if mode == "TermsOnly" then
-        return _("Terms, no positions — no phrase search")
+        return _("Terms, no positions")
     end
-    return _("Full text — phrases allowed")
+    return _("Full text")
 end
 
 --- Opens the index briefly and reports what it holds.
 ---
 --- The handle is closed before anything is shown, for the same reason the search
---- path closes it: a settings screen that holds a database open while the reader
---- reads it is a database open while the reader is doing something else.
+--- path closes it: a settings popup holding a database open while the reader reads
+--- it is a database open while the reader is doing something else.
 function Settings:report(settings)
     local plugin = self.main
     local binding, bind_err = plugin:engine()
@@ -89,34 +97,27 @@ function Settings:report(settings)
     local info = binding.index_info(handle)
     binding.close(handle)
 
-    -- A content mode that cannot answer the search mode chosen is worth saying
-    -- rather than leaving the reader to find out by typing a query.
+    -- A content mode that cannot answer the mode chosen is worth saying rather
+    -- than leaving a reader to find out by typing a query.
     local warn = nil
-    if info.mode ~= "Full" then
-        if settings:readSetting("search_mode") == "Pattern" then
-            warn = _("The index only stores terms without positions, so a pattern search \
-will find the documents but cannot rank or highlight them.")
-        else
-            warn = _("The index only stores terms without positions, so phrases in \
-quotes will not match. Change the search mode to leave quotes loose, or rebuild the index.")
-        end
-    end
     if info.mode == "FileList" then
-        warn = _("This index is only a list of files: it has no text to search at all. \
-Point the plugin at an index built with CONTENT_MODE=terms or full.")
+        warn = _("This index is only a list of files, so it has no text to search. \
+Build one with CONTENT_MODE=terms or full.")
+    elseif info.mode == "TermsOnly" then
+        warn = _("This index has no positions, so phrases in quotes will not match. \
+Switch to a loose query, or rebuild the index.")
     end
 
     return {
         index = index_path,
         bytes = info.bytes,
         terms = info.terms,
-        content = content_label(info.mode, settings:readSetting("search_mode")),
-        mode = mode_label(settings:readSetting("search_mode")),
-        warn = warn,
+        content = content_short(info.mode),
+        mode = mode_short(settings:readSetting("search_mode")),
     }, ""
 end
 
---- Shows the settings screen.
+--- Opens the settings popup.
 function Settings:show()
     local plugin = self.main
     local settings = plugin:loadSettings()
@@ -124,90 +125,111 @@ function Settings:show()
     local report, err = self:report(settings)
     if not report then
         UIManager:show(ConfirmBox:new{
-            title = _("No index"),
+            title = _("Book search"),
             text = err,
+            icon = "texture-box",
             ok_text = _("Close"),
         })
         return
     end
 
-    local items = {
-        { text = _("Search"), sub_text = report.mode },
-        { text = _("Index"), sub_text = report.index },
-        { text = _("Content"), sub_text = report.content },
-        { text = _("Size"), sub_text = format_bytes(report.bytes) },
-        { text = _("Terms"), sub_text = string.format("%d", report.terms) },
-    }
-    if report.warn then
-        items[#items + 1] = {
-            text = _("Not available"),
-            sub_text = report.warn,
-            dim = true,
-        }
-    end
+    -- The report goes in the title, where a popup puts what it is about. Each
+    -- line is a fact to read and none is something to tap, so none of them is a
+    -- button.
+    local title = _("Book search") .. "\n\n"
+        .. _("Index") .. "  " .. report.index .. "\n"
+        .. _("Size") .. "  " .. format_bytes(report.bytes) .. "\n"
+        .. _("Terms") .. "  " .. string.format("%d", report.terms) .. "\n"
+        .. _("Content") .. "  " .. report.content .. "\n"
+        .. _("Query means") .. "  " .. report.mode
 
-    local menu
-    menu = Menu:new{
-        title = _("Book search"),
-        item_table = items,
-        covers_full_width = true,
-        onMenuSelect = function(_, item)
-            -- The first row is the one thing this screen changes; the rest are
-            -- read from the index and cannot be, so they are marked read-only.
-            if item.text == _("Search") then
-                UIManager:close(menu)
-                self:chooseMode(settings)
-            elseif item.text == _("Index") then
-                UIManager:show(InfoMessage:new{ text = report.index })
-            else
-                UIManager:show(InfoMessage:new{
-                    text = item.sub_text or item.text,
-                })
-            end
-        end,
+    local dialog
+    dialog = ButtonDialog:new{
+        title = title,
+        -- One row of the two things a reader came to change, and a close under
+        -- them, so the popup is two taps tall and does not scroll.
+        buttons = {
+            {
+                {
+                    text = _("Query means"),
+                    icon = ICON_SEARCH,
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:chooseMode(settings)
+                    end,
+                },
+                {
+                    text = _("Index"),
+                    icon = ICON_FOLDER,
+                    callback = function()
+                        UIManager:close(dialog)
+                        UIManager:show(InfoMessage:new{ text = report.index })
+                    end,
+                },
+            },
+            {
+                {
+                    text = _("Close"),
+                    icon = ICON_CLOSE,
+                    callback = function()
+                        UIManager:close(dialog)
+                    end,
+                },
+            },
+        },
     }
-    UIManager:show(menu)
+    UIManager:show(dialog)
 end
 
 --- Chooses what the query means.
 ---
---- Secured as a menu rather than a dialog because it is three choices and no
---- typing: a dialog with three buttons is the same control with more
---- interaction in front of it.
+--- A popup with a row per option rather than a dialog with a keyboard: three
+--- choices and no typing, so the control is three buttons and the current one is
+--- marked. Tapping one applies it and comes back here, which keeps the reader
+--- looking at the same popup they already understood.
 function Settings:chooseMode(settings)
-    local options = {
-        { text = _("Book text"), sub_text = _("phrases in quotes match exactly"), mode = "Text" },
-        { text = _("Title, author, series"), sub_text = _("skip the book contents"), mode = "Metadata" },
-        { text = _("Regular expression"), sub_text = _("over the terms in the index"), mode = "Pattern" },
-    }
+    local current = settings:readSetting("search_mode")
 
-    local menu
-    menu = Menu:new{
-        title = _("What should the query mean?"),
-        item_table = options,
-        covers_full_width = true,
-        onMenuSelect = function(_, item)
-            settings:saveSetting("search_mode", item.mode)
-            settings:flush()
-            UIManager:close(menu)
-            self:show()
-        end,
-    }
-    UIManager:show(menu)
-end
+    local function option(mode, text, help)
+        return {
+            text = text .. "  " .. help,
+            text_font_bold = current == mode,
+            callback = function()
+                settings:saveSetting("search_mode", mode)
+                settings:flush()
+                self:show()
+            end,
+        }
+    end
 
---- Opens the index directory, for a reader who wants to copy one across.
----
---- The generator is the indexer binary in this repository, not something the
---- plugin can do: building an index reads every book and writes hundreds of
---- megabytes, which is not a job for a menu callback on an e-reader. So the
---- plugin says what to run rather than pretending it can.
-function Settings:openIndexFolder(settings)
-    local index_path = settings:readSetting("index_path")
-    local dir = index_path:match("(.*[/\\])")
-    UIManager:show(InfoMessage:new{
-        text = dir or index_path,
-    })
+    local dialog
+    dialog = ButtonDialog:new{
+        title = _("What should the query mean?") .. "\n\n"
+            .. _("Now") .. ": " .. mode_short(current),
+        buttons = {
+            {
+                option("Text", _("Book text"),
+                    _("phrases in quotes match exactly")),
+            },
+            {
+                option("Metadata", _("Title, author, series"),
+                    _("skip the book contents")),
+            },
+            {
+                option("Pattern", _("Regular expression"),
+                    _("over the terms in the index")),
+            },
+            {
+                {
+                    text = _("Close"),
+                    callback = function()
+                        UIManager:close(dialog)
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
 end
 
 return Settings

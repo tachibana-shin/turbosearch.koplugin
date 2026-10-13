@@ -272,8 +272,15 @@ function Turbosearch:search(raw_query)
     for i = 1, math.min(#hits, MAX_RESULTS) do
         local hit = hits[i]
         local path = binding.book_path(handle, hit.doc_id)
+        local title = binding.book_title(handle, hit.doc_id)
+        -- The format goes on the right, the way the reader's own file browser
+        -- puts it there: a list of titles all starting with "An mang..." is a
+        -- list of the same string, and the format is the one distinguishing
+        -- thing a row can carry without another line.
+        local suffix = path:match("%.([^%.]+)$")
         items[i] = {
-            text = binding.book_title(handle, hit.doc_id),
+            text = title ~= "" and title or path:match("[^/]+$"),
+            mandatory = suffix and suffix:upper() or "",
             path = path,
         }
     end

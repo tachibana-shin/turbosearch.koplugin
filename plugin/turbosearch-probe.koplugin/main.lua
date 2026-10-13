@@ -158,12 +158,17 @@ function Probe:probe()
     ts.close(handle)
 
     -- Build the rows the way main.lua does, then hand them to the real Menu.
+    -- Built with the fields the plugin's own rows carry, `mandatory` included:
+    -- a row with a right-hand column is a different path through Menu's item
+    -- widget, so the field is exercised here rather than read off a doc comment.
     local items = {}
     local missing = 0
     for i = 1, #hits do
         local path = hits[i] and hits[i].path or "?"
+        local suffix = path:match("%.([^%.]+)$")
         items[i] = {
             text = path and path ~= "" and path:match("[^/]+$") or "?",
+            mandatory = suffix and suffix:upper() or "",
             path = path,
         }
     end

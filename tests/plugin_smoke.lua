@@ -49,6 +49,8 @@ package.path = PLUGIN_DIR .. "?.lua;" .. package.path
             -- hides the one thing worth reading.
             if args.title == _("Search in books") then
                 captured.dialog = args
+            elseif args.buttons then
+                captured.popup = args
             elseif args.item_table then
                 captured.menu = args
             else
@@ -81,6 +83,7 @@ package.path = PLUGIN_DIR .. "?.lua;" .. package.path
     package.preload["ui/widget/inputdialog"] = loader(widgets)
     package.preload["ui/widget/menu"] = loader(widgets)
     package.preload["ui/widget/confirmbox"] = loader(widgets)
+    package.preload["ui/widget/buttondialog"] = loader(widgets)
     package.preload["luasettings"] = loader({
         --- A fresh object per open, the way the real one has a file behind it.
         open = function(_, _path)
@@ -172,6 +175,14 @@ local first = captured.menu and captured.menu.item_table and captured.menu.item_
 check("each row has a title", first and first.text ~= nil and first.text ~= "", first and first.text)
 check("each row has a path to open", first and first.path ~= nil and first.path ~= "",
     first and first.path)
+-- The format on the right is what makes a list of Vietnamese titles readable:
+-- without it every row starts with the same three letters.
+check("each row carries its format on the right",
+    first and first.mandatory ~= nil and first.mandatory ~= "",
+    first and first.mandatory)
+check("the format is the file's suffix, capitalised",
+    first and first.mandatory == first.path:match("%.([^%.]+)$"):upper(),
+    first and first.mandatory)
 check("the subtitle names the query",
     captured.menu and captured.menu.subtitle:find("thám tử", 1, true) ~= nil)
 
@@ -223,6 +234,29 @@ local path = captured.menu and captured.menu.item_table[1]
 captured.opened = nil
 instance:openBook(path)
 check("selecting a row opens that file", captured.opened == path, captured.opened)
+
+io.write("\nsettings popup\n")
+
+captured.popup = nil
+captured.info = nil
+instance:onTurbosearchSettings()
+check("the settings open as a popup, not a menu", captured.popup ~= nil,
+    captured.info and captured.info.text or "nothing was shown")
+check("the popup reports the index it points at",
+    captured.popup and captured.popup.title
+        and captured.popup.title:find(INDEX, 1, true) ~= nil,
+    captured.popup and captured.popup.title)
+check("the popup reports the size in a unit a reader can act on",
+    captured.popup and captured.popup.title:find("MB", 1, true) ~= nil,
+    captured.popup and captured.popup.title)
+check("the popup has a button for the thing that can change",
+    captured.popup and captured.popup.buttons
+        and captured.popup.buttons[1] and captured.popup.buttons[1][1]
+        and captured.popup.buttons[1][1].text ~= nil)
+check("the popup has a close button",
+    captured.popup and captured.popup.buttons[2]
+        and captured.popup.buttons[2][1]
+        and captured.popup.buttons[2][1].text == _("Close"))
 
 io.write("\nrebuilding the menu\n")
 -- The handle is closed before the menu is built, so a second search must work
