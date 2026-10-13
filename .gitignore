@@ -11,3 +11,7 @@ tl/*.lua
 *.idx
 *.idx-wal
 *.idx-shm
+
+.env
+target/
+.indexer.log
