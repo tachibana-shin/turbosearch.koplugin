@@ -259,16 +259,28 @@ dead weight on any given reader.
 | Platform | Target | For |
 |---|---|---|
 | `desktop` | `x86_64-unknown-linux-musl` | the desktop reader, and any x86-64 machine |
-| `kindle` | `arm-unknown-linux-musleabi` | Kindle, soft-float ABI, no SoC tuning |
-| `kindlea9` | `arm-unknown-linux-musleabi` + `target-cpu=cortex-a9` | **Kindle Paperwhite 3** |
-| `kindlehf` | `arm-unknown-linux-musleabihf` | Kindle whose toolchain uses the hard-float ABI |
+| `kindle` | `arm-unknown-linux-musleabi` | **every Kindle, Paperwhite 3 included** |
+| `kindlehf` | `arm-unknown-linux-musleabihf` | the same, for a reader whose own libraries are hard-float |
 | `aarch64` | `aarch64-unknown-linux-musl` | newer readers with a 64-bit ARM |
 
 Every Linux target is musl rather than gnu. A `.so` linked against the build
 machine's glibc is linked against a version the reader does not have, and the
 failure is a reader that loads the plugin and then finds no engine; musl carries
-its own. The Paperwhite 3 is soft-float even on ARMv7, which is why `kindlea9`
-and `kindle` share a target and `kindlea9` exists only for the SoC tuning.
+its own.
+
+Which Kindle is not a guess, and it is the one thing that cannot be read off a
+device from the outside: the Paperwhite 3 is **soft-float** even on ARMv7, and a
+hard-float library on it fails in the dynamic linker before a line of the
+plugin runs. `kindle` is soft-float — `readelf -h` says so in `Flags` — and
+`kindlehf` is the hard-float one for readers whose own libraries were built that
+way. If in doubt, take `kindle`: the wrong one is a plugin that loads and then
+finds no engine, and the right one costs nothing to try.
+
+`make plugin PLATFORM=kindlea9` also exists, and builds the soft-float library
+with `-C target-cpu=cortex-a9` for that SoC. It is not a release of its own: it
+is the same ABI as `kindle`, tuned for a processor the soft-float build already
+runs on, so a second archive would be a choice between two files that both work
+rather than between one that works and one that does not.
 
 `build/turbosearch.json` indexes them: which archive is which platform, the target
 it was built for, its size, and a sha256. Attached to a release so a script — or a
