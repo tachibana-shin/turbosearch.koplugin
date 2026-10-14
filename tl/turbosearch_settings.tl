@@ -61,6 +61,9 @@ end
 local record SettingsHost
    engine: function(any): EngineBinding
    loadSettings: function(any): SettingsFile
+   --- Reopens the query box, so that leaving settings entered from it returns the
+   --- reader to the keyword they had typed rather than to the book list.
+   show_search: function(any)
 end
 
 -- The warning travels with the report, so the screen can decide whether it
@@ -78,9 +81,10 @@ end
 ---
 -- Named rather than drawn because an icon that ships with the reader renders in
 -- whatever style the reader is using, and one that does not shows as a placeholder.
-local ICON_SEARCH: string = "appbar.search"
-local ICON_FOLDER: string = "appbar.filebrowser"
-local ICON_CLOSE: string = "close"
+--- Icons, as text rather than images — see tl/plugin.tl for why.
+local ICON_SETTINGS: string = ""
+local ICON_FOLDER: string = ""
+local ICON_CLOSE: string = ""
 
 -- Sizes a byte count in a unit a reader can act on.
 local function format_bytes(bytes: number): string
@@ -120,10 +124,12 @@ local record Settings
    --- declared here because a record's type cannot see its metatable.
    new: function(any, any): Settings
    main: SettingsHost
+   --- Where settings were opened from, and what to do when they are left.
+   return_to_search: boolean
 
    report: function(Settings): IndexReport, string
    show: function(Settings)
-   choose_mode: function(Settings)
+   configure: function(Settings)
 end
 
 setmetatable(Settings, { __index = WidgetContainer })
@@ -202,21 +208,19 @@ function Settings:show()
    local dialog: any
    dialog = ButtonDialog:new{
       title = title,
-      -- One row of the two things a reader came to change, and a close under
-      -- them, so the popup is two taps tall and does not scroll.
+      -- Two buttons on one row, and a close under them, so the popup is two taps
+      --- tall and does not scroll.
       buttons = {
          {
             {
-               text = _("Query means"),
-               icon = ICON_SEARCH,
+               text = ICON_SETTINGS .. "  " .. _("Settings"),
                callback = function()
                   UIManager:close(dialog)
-                  self:choose_mode()
+                  self:configure()
                end,
             },
             {
-               text = _("Index"),
-               icon = ICON_FOLDER,
+               text = ICON_FOLDER .. "  " .. _("Index"),
                callback = function()
                   UIManager:close(dialog)
                   UIManager:show(InfoMessage:new{ text = report.index } as any)
@@ -225,10 +229,14 @@ function Settings:show()
          },
          {
             {
-               text = _("Close"),
-               icon = ICON_CLOSE,
+               --- The round trip ends here: back to the keyword the reader had
+               --- typed, rather than to the book list.
+               text = ICON_CLOSE .. "  " .. _("Close"),
                callback = function()
                   UIManager:close(dialog)
+                  if self.return_to_search then
+                     (self.main as SettingsHost).show_search(self.main)
+                  end
                end,
             },
          },

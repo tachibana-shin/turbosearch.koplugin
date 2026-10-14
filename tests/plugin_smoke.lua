@@ -183,13 +183,15 @@ check("a regular expression is one of the options",
 local row = captured.dialog and captured.dialog.buttons
     and captured.dialog.buttons[2] or {}
 check("settings and search are two buttons in one row", #row == 2, #row)
-check("settings is on the left", row[1] and row[1].text == "Settings",
+--- Each button starts with a nerdfont glyph in the Private Use Area, which the
+--- reader draws through its fallback font — a character, not a decoded image.
+check("settings is on the left", row[1] and row[1].text:find("Settings"),
     row[1] and row[1].text)
-check("search is on the right", row[2] and row[2].text == "Search",
+check("search is on the right", row[2] and row[2].text:find("Search"),
     row[2] and row[2].text)
-check("both carry an icon from the reader's set",
-    row[1] and row[1].icon ~= nil and row[2] and row[2].icon ~= nil,
-    row[1] and row[1].icon)
+check("each button carries a nerdfont glyph",
+    row[1] and #row[1].text > #("Settings") and row[2] and #row[2].text > #("Search"),
+    row[1] and row[1].text)
 
 captured.menu = nil
 instance:search("thám tử")
@@ -288,10 +290,10 @@ check("the popup has a button for the thing that can change",
     captured.popup and captured.popup.buttons
         and captured.popup.buttons[1] and captured.popup.buttons[1][1]
         and captured.popup.buttons[1][1].text ~= nil)
+local close_row = captured.popup and captured.popup.buttons[2]
 check("the popup has a close button",
-    captured.popup and captured.popup.buttons[2]
-        and captured.popup.buttons[2][1]
-        and captured.popup.buttons[2][1].text == _("Close"))
+    close_row and close_row[1] and close_row[1].text:find("Close", 1, true),
+    close_row and close_row[1] and close_row[1].text)
 
 io.write("\nrebuilding the menu\n")
 -- The handle is closed before the menu is built, so a second search must work

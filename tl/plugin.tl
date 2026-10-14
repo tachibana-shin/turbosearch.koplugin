@@ -71,6 +71,27 @@ local function plugin_dir(): string
    return (source:match("(.*/)") or "./")
 end
 
+--- Icons, as text rather than images.
+---
+--- KOReader loads nerdfonts as a *fallback* font, so a glyph is a character at a
+--- Private Use Area codepoint that the font supplies an outline for. This is how the
+--- reader composes its own icon rows — readertypography.lua inserts the raw
+--- character into a string — and it costs nothing to draw: no image is decoded and
+--- no icon is looked up, while the glyph takes the size, colour and face of the
+--- text it sits in.
+---
+--- The `icon = "appbar.settings"` form used before is a different mechanism
+--- entirely: it names an SVG under resources/icons, which the reader then decodes
+--- and scales. It works, but it is a second way to say the same thing, and a name
+--- that does not exist renders as a placeholder rather than an error.
+---
+--- Codepoints, from the font the reader actually loads:
+---   from fontTools import TTFont
+---   TTFont('/usr/lib/koreader/fonts/nerdfonts/symbols.ttf').getBestCmap()
+local ICON_SEARCH: string = ""
+local ICON_SETTINGS: string = ""
+local ICON_CLOSE: string = ""
+
 --- The engine library, always under one name.
 ---
 --- A release is built per platform and each contains a `libturbosearch.so` for that
@@ -182,7 +203,7 @@ local record Turbosearch
    onDispatcherRegisterActions: function(Turbosearch)
    addToMainMenu: function(Turbosearch, {string: any})
    onTurbosearchSearch: function(Turbosearch)
-   onTurbosearchSettings: function(Turbosearch)
+   onTurbosearchSettings: function(Turbosearch, boolean)
    search: function(Turbosearch, string, {string: any})
    query: function(Turbosearch, EngineBinding, any, string, {string: any}): {Hit}, string
    count_text: function(Turbosearch, integer): string
@@ -272,11 +293,13 @@ function Turbosearch:addToMainMenu(menu_items: {string: any})
          self:onTurbosearchSearch()
       end,
    }
+   --- From the main menu there is nothing to come back to, so the round trip is
+   --- only from the query box.
    menu_items.turbosearch_settings = {
       text = _("Book search settings"),
       sorting_hint = "more_tools",
       callback = function()
-         self:onTurbosearchSettings()
+         self:onTurbosearchSettings(false)
       end,
    }
 end
@@ -285,8 +308,8 @@ end
 ---
 --- A separate entry point rather than a branch of the search one, so a reader who
 --- wants to know what an index holds does not have to dismiss a query box first.
-function Turbosearch:onTurbosearchSettings()
-   local screen = Settings:new{ main = self }
+function Turbosearch:onTurbosearchSettings(return_to_search: boolean)
+   local screen = Settings:new{ main = self, return_to_search = return_to_search }
    screen:show()
 end
 
@@ -306,7 +329,7 @@ function Turbosearch:onTurbosearchSearch()
       buttons = {
          {
             {
-               text = _("Cancel"),
+               text = ICON_CLOSE .. "  " .. _("Cancel"),
                callback = function()
                   UIManager:close(dialog)
                end,
@@ -314,16 +337,18 @@ function Turbosearch:onTurbosearchSearch()
          },
          {
             {
-               text = _("Settings"),
-               icon = "appbar.settings",
+               text = ICON_SETTINGS .. "  " .. _("Settings"),
                callback = function()
                   UIManager:close(dialog)
-                  self:onTurbosearchSettings()
+                  --- Settings is a round trip. Leaving it closes the query box and
+                  --- opens it again, so a reader who came here to change the index
+                  --- — or who tapped the button by mistake — is back at the keyword
+                  --- rather than at the book list.
+                  self:onTurbosearchSettings(true)
                end,
             },
             {
-               text = _("Search"),
-               icon = "appbar.search",
+               text = ICON_SEARCH .. "  " .. _("Search"),
                is_enter_default = true,
                callback = function()
                   local query: string = dialog:getInputText()
