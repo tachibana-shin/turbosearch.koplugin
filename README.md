@@ -89,17 +89,47 @@ because a reader who looks for an author once looks for another author next.
 A tap opens the book. The results menu carries each book's title and its format
 on the right, where the reader's own file browser puts it.
 
-**Settings** (left of the group, or the second menu entry) is everything the
-plugin can be told to do differently: which index to read, and what those two
-checkboxes start out as. Its first screen also reports what the index holds — its
-size on disk including the write-ahead log, its term count, and its content mode —
-and says out loud when a content mode cannot do what the search asks: a `files`
-index has no text to search, and a `terms` index has nothing for a phrase to
-match.
-There is no case-sensitivity setting, and not by omission. The index stores
-folded terms, so a query never had a case to be sensitive to; giving it one would
-mean storing the original alongside every term, doubling an index whose size the
-whole design is built around.
+**Settings** (left of the group, or the second menu entry) is one screen holding
+every setting the engine acts on, in two panes — not a report behind a button
+behind a popup:
+
+```
+┌─ ⚙ Book search settings ─────────┐
+│ Stored — what the engine acts on  │
+│ Folders to index  /mnt/us/…       │
+│ File types to skip log,lua,js…    │
+│ Positions kept per term   full    │
+│ Expand a prefix query     auto    │
+│ What is stored           full    │
+│                                  │
+│                              [✕] │
+└──────────────────────────────────┘
+```
+
+A row is a label on the left and what is in force on the right, measured against
+the screen rather than counted in characters — a character is eight pixels on one
+device and twelve on another, and only the pixels decide whether the label still
+has room. Tap a row to change it. Closing comes back to the keyword, because a
+settings screen is a round trip and not a destination.
+
+The two panes are two different homes for a setting:
+
+- **Stored** is the record inside the index, which the engine reads back the next
+  time anything opens it: what to index and skip, the size bounds, how many
+  positions to keep, how a prefix query expands, what is stored at all.
+- **Next run** is what the indexer was started with, and a settings screen cannot
+  reach into a running process — so it records what the *next* run should use, in
+  `<index>.env` beside the index. A variable already set in the environment wins
+  over that file, so a one-off run from a shell still behaves.
+
+`What is stored` is read from the engine but refused on the way back. It decides
+what is stored, so changing it would leave postings in the shape the old mode
+produced and every result would come from an index that no longer means what it
+says; the refusal names the fix, which is to rebuild. There is no case-sensitivity
+setting, and not by omission: the index stores folded terms, so a query never had
+a case to be sensitive to, and giving it one would mean storing the original
+alongside every term — doubling an index whose size the whole design is built
+around.
 
 ```sh
 make plugin                   # build the plugin for this machine
@@ -160,11 +190,14 @@ then fails on every use of ffi, a check that cannot fail for a real reason.
 
 Everything the plugin touches is declared once, in `tl/`, against a stub of the
 reader's own module: `Menu`, `InputDialog`, `ButtonDialog`, `ConfirmBox`,
-`UIManager`, `LuaSettings`, `Dispatcher`, `FileManager`. That is what turns a
-field the installed reader does not have into a build error rather than a screen
-that silently does not do what it looks like — `dimmed`, `UIManager:setInputDialog`
-and `ui/widget/alertdialog` were all found on a device, one at a time, and would
-have been found here. `MODE` and the engine's ABI are checked the same way.
+`CheckButton`, `InfoMessage`, `WidgetContainer`, `UIManager`, `LuaSettings`,
+`Dispatcher`, `FileManager`, and — because the settings screen sizes a column in
+pixels rather than in characters — `device`, `ui/font` and `ui/rendertext`. That
+is what turns a field the installed reader does not have into a build error rather
+than a screen that silently does not do what it looks like — `dimmed`,
+`UIManager:setInputDialog` and `ui/widget/alertdialog` were all found on a device,
+one at a time, and would have been found here. `MODE` and the engine's ABI are
+checked the same way.
 
 What Teal does *not* catch: a case-insensitive setting, because the index stores
 folded terms — a query never had a case to be sensitive to, and giving it one
@@ -174,10 +207,13 @@ size the whole design is built around.
 ### Verifying against a real reader
 
 `script/lua-test` stubs the KOReader widgets. The one thing it cannot reach is
-the installed reader itself, so `plugin/turbosearch-probe.koplugin` closes that
-gap: it builds the same `InputDialog` and `Menu` the plugin builds, from the rows
-a real search returns, and opens a book through `FileManager.openFile`. It is
-inert unless asked for, so symlinking it in costs nothing.
+the installed reader itself, so `tests/koreader-probe/` closes that gap: it builds
+the same `InputDialog` and `Menu` the plugin builds, from the rows a real search
+returns, reads and refuses a setting through the same calls the settings screen
+uses, and opens a book through `FileManager.openFile`. It is inert unless asked
+for, so installing it costs nothing — and `TURBOSEARCH_PROBE=settings` leaves the
+settings screen open and photographs both of its panes, which is how the column
+that was squeezing a label to zero width was found.
 
 ```sh
 ln -s "$PWD/plugin/turbosearch-probe.koplugin" \

@@ -25,6 +25,61 @@ use turbosearch::storage::metadata::{BookMetaRecord, Provenance};
 use turbosearch::storage::{Engine, RunError, book::FileEntry, config::Config};
 use turbosearch::tokenize::for_each_token_spanned;
 
+/// Reads an environment variable, falling back to the settings file beside the
+/// index.
+///
+/// The plugin writes `<index>.env`, and a variable the process was started without
+/// is answered from there — so a setting changed on the reader reaches the next run
+/// without anybody exporting it first. A variable that *is* set in the environment
+/// wins: a one-off run from a shell should not be overridden by what the settings
+/// screen says.
+///
+/// The file is `KEY = value` per line, the same shape the plugin shows, and a
+/// missing or unreadable file means "no settings", exactly like an unset variable.
+fn env_setting(db_path: &str, key: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(key) {
+        return Some(v);
+    }
+    let file = std::path::Path::new(db_path).with_extension("env");
+    let text = std::fs::read_to_string(&file).ok()?;
+    env_from_text(&text, key)
+}
+
+/// Reads one setting out of the text of a settings file.
+///
+/// A blank value is *unset*, not set-to-nothing, and the difference is not
+/// academic: `FRESH` is answered by its presence, so the settings screen writing
+/// `FRESH=` for a field nobody filled in would have discarded the index on the
+/// next run. The screen writes every key it offers, blank when there is no
+/// choice to record, which means a blank line has to read as "nothing decided
+/// here" — exactly as an absent file does.
+fn env_from_text(text: &str, key: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Out of the `if` rather than nested inside it: a line either has a key
+        // and a value or it is not a setting, and saying so once reads as the
+        // loop's own condition.
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if k.trim() == key {
+            let value = v.trim();
+            if value.is_empty() {
+                // The line says nothing, so it does not answer and does not
+                // shadow a later line that does. Only a blank at the end of the
+                // file — which is where a settings screen leaves a field nobody
+                // filled in — reads as unset.
+                continue;
+            }
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let root = PathBuf::from(args.next().unwrap_or_else(|| {
@@ -42,8 +97,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .to_string_lossy()
             .into_owned()
     }));
-    let max_books: Option<usize> = std::env::var("MAX_BOOKS").ok().and_then(|v| v.parse().ok());
-    let want_search = std::env::var("SEARCH").ok();
+    // Where the settings file sits: the index, with `env` in place of `idx`.
+    let db_path: String = db.to_string_lossy().into_owned();
+
+    let max_books: Option<usize> = env_setting(&db_path, "MAX_BOOKS").and_then(|v| v.parse().ok());
+    let want_search = env_setting(&db_path, "SEARCH");
     // `--mode full|terms|files` persists the choice into CONFIG.
     let set_mode: Option<String> = {
         let argv: Vec<String> = std::env::args().collect();
@@ -56,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The database is only wiped when asked, because wiping it also wipes the
     // CONFIG row the content mode lives in — and a tool that silently discards
     // the setting it was just given is worse than one that refuses.
-    if std::env::var("FRESH").is_ok() {
+    if env_setting(&db_path, "FRESH").is_some() {
         std::fs::remove_file(&db).ok();
         // The WAL and shared-memory sidecars survive the main file and make the
         // next open read a stale journal, so they go too.
@@ -81,10 +139,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("write config: {e}"))?;
         parsed
     } else {
-        match std::env::var("CONTENT_MODE").as_deref() {
-            Ok("terms") => turbosearch::storage::config::ContentMode::TermsOnly,
-            Ok("files") => turbosearch::storage::config::ContentMode::FileList,
-            Ok("full") => turbosearch::storage::config::ContentMode::Full,
+        match env_setting(&db_path, "CONTENT_MODE").as_deref() {
+            Some("terms") => turbosearch::storage::config::ContentMode::TermsOnly,
+            Some("files") => turbosearch::storage::config::ContentMode::FileList,
+            Some("full") => turbosearch::storage::config::ContentMode::Full,
             _ => stored.content_mode,
         }
     };
@@ -387,7 +445,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(engine);
     let diag = Engine::open(&db)?;
 
-    if let Ok(q) = std::env::var("META_SEARCH") {
+    if let Some(q) = env_setting(&db_path, "META_SEARCH") {
         let rows = turbosearch::storage::metadata::search(&diag, &q)?;
         println!("metadata {q:?} -> {} results", rows.len());
         for (id, title) in rows.iter().take(10) {
@@ -536,8 +594,19 @@ fn entry_name(path: &Path, idx: usize) -> String {
 /// file look new on every run, so a rescan re-tokenized the whole library and
 /// the file grew each time — measured at 15,3 s and a doubled database for a
 /// rescan with no changes.
+///
+/// The settings come from the **database**, not from `Config::default()`. A
+/// settings screen cannot be worth opening if what it writes is ignored on the
+/// next run, and the config row is the one place both the plugin and this binary
+/// can see. `Default` is still the fallback for an index nobody has configured.
 fn plan(engine: &Engine, root: &Path, max: Option<usize>) -> Vec<FileEntry> {
-    let cfg = Config::default();
+    let cfg = match engine.config() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("config: {e}, using defaults");
+            Config::default()
+        }
+    };
     let mut out = match scan_scope(engine, &cfg.filter(), root) {
         Ok(p) => {
             eprintln!(
@@ -642,4 +711,52 @@ fn load_sections(path: &Path, format: Format) -> Result<Decoded, RunError> {
 
 fn bad(what: &str) -> RunError {
     RunError::Message(what.to_string())
+}
+
+#[cfg(test)]
+mod env_settings {
+    use super::env_from_text;
+
+    /// The one that matters: the settings screen writes every key it offers,
+    /// blank when there is no choice to record, and `FRESH` is answered by its
+    /// presence — so a blank line read as a value would discard the index on the
+    /// next run. Blank has to mean "nothing decided here".
+    #[test]
+    fn a_blank_value_is_unset() {
+        let file = "CONTENT_MODE=\nMAX_BOOKS=\nSEARCH=\nMETA_SEARCH=\nFRESH=\n";
+        assert_eq!(env_from_text(file, "FRESH"), None);
+        assert_eq!(env_from_text(file, "CONTENT_MODE"), None);
+        assert_eq!(env_from_text(file, "MAX_BOOKS"), None);
+    }
+
+    #[test]
+    fn a_value_is_returned_trimmed() {
+        assert_eq!(
+            env_from_text("CONTENT_MODE = terms \n", "CONTENT_MODE"),
+            Some("terms".to_string())
+        );
+    }
+
+    #[test]
+    fn a_blank_value_does_not_hide_a_later_one() {
+        // Two lines for one key is something only a hand-edit produces, and the
+        // hand meant the second one.
+        assert_eq!(
+            env_from_text("FRESH=\nFRESH=1\n", "FRESH"),
+            Some("1".to_string())
+        );
+    }
+
+    #[test]
+    fn comments_and_broken_lines_are_not_settings() {
+        let file = "# a comment\n\nnot a setting\nFRESH=1\n";
+        assert_eq!(env_from_text(file, "FRESH"), Some("1".to_string()));
+        assert_eq!(env_from_text(file, "# a comment"), None);
+    }
+
+    #[test]
+    fn an_absent_key_is_unset() {
+        assert_eq!(env_from_text("CONTENT_MODE=full\n", "MAX_BOOKS"), None);
+        assert_eq!(env_from_text("", "FRESH"), None);
+    }
 }

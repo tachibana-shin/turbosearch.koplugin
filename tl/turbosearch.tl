@@ -42,6 +42,10 @@ const char *ts_last_error(void);
 
 long long ts_index_bytes(const ts_index *handle);
 long long ts_term_count(const ts_index *handle);
+
+/* The stored settings, and applying a partial change to them. */
+char *ts_config_text(ts_index *handle);
+int ts_set_config_text(ts_index *handle, const char *text);
 ]])
 
 ------------------------------------------------------------
@@ -368,6 +372,33 @@ return {
    search_as = search_as,
    search_pattern = search_pattern,
    index_info = index_info,
+   --- The whole config, as `key = value` lines.
+   ---
+   --- One handle, one read, closed by the caller — the same borrow a search uses.
+   --- Returns the text, or nil plus the engine's reason.
+   config_text = function(handle: Handle): string, string
+      local buf: any = C.ts_config_text(handle.ptr)
+      if buf == ffi.NULL then
+         return nil, last_error()
+      end
+      --- Read before freeing, which is the whole point of the helper: the engine's
+      --- buffer is freed by the caller, so the order is a use-after-free otherwise,
+      --- and it would read as a misspelled setting rather than a crash.
+      local text: string = ffi.string(buf)
+      C.ts_free(buf)
+      return text, ""
+   end,
+   --- Applies settings lines, leaving the rest alone.
+   ---
+   --- True, or false plus the reason: the engine refuses a line it cannot apply,
+   --- and the caller is the one that can say what that means.
+   apply_config = function(handle: Handle, text: string): boolean, string
+      local code: integer = C.ts_set_config_text(handle.ptr, text)
+      if code == 0 then
+         return true, ""
+      end
+      return false, last_error()
+   end,
    book_title = book_title,
    book_path = book_path,
 

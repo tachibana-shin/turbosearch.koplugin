@@ -27,6 +27,11 @@ local record CLibrary
    ts_last_error: function(): any
    -- Bytes of everything the index occupies on disk, log included.
    ts_index_bytes: function(any): integer
+   -- The whole config, as key = value lines — every setting the engine acts on,
+   -- including the ones a build chooses rather than a query.
+   ts_config_text: function(any): any
+   -- Applies settings lines, leaving the ones absent alone.
+   ts_set_config_text: function(any, string): integer
    -- Distinct terms, which is what separates the three content modes in
    -- practice more tellingly than the size does.
    ts_term_count: function(any): integer

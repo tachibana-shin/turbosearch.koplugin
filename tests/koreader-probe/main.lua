@@ -108,7 +108,34 @@ function Probe:showSettingsScreen()
     end)
     if not ok then
         logger.info("PROBE: failed", tostring(err))
+        return
     end
+
+    -- The screen is left open on purpose, so the shots have to wait for the next
+    -- paint rather than race it — and there are two, because the pane a setting
+    -- lives in decides whether it is a record in the index or a line the next
+    -- indexer run will read, and a reader has to be able to tell them apart.
+    local UIManager = require("ui/uimanager")
+    local Screen = require("device").screen
+    local dir = os.getenv("TURBOSEARCH_SHOT_DIR") or "/tmp/opencode"
+
+    local function shot(name)
+        local path = dir .. "/" .. name .. ".png"
+        local shot_ok, shot_err = Screen:shot(path)
+        logger.info("PROBE: screenshot", name, tostring(shot_ok), tostring(shot_err))
+    end
+
+    UIManager:scheduleIn(3, function()
+        shot("settings-config")
+        local screen = instance.settings_screen
+        if not screen then
+            logger.info("PROBE: no settings screen to switch panes on")
+            return
+        end
+        screen.pane = "env"
+        screen:show()
+        UIManager:scheduleIn(3, function() shot("settings-env") end)
+    end)
 end
 
 function Probe:probe()
@@ -206,29 +233,42 @@ function Probe:probe()
         logger.info("PROBE: row", i, items[i].text, "|", items[i].path)
     end
 
-    --- The settings screen reads this same index through the same calls, so its
-    --- report is exercised here rather than only in the stub test: what it prints
-    --- is what a reader reads off the screen.
+    --- The settings screen reads this same index through these same calls, so
+    --- they are exercised here rather than only in the stub test: what a reader
+    --- reads off a row is what comes back from the engine, and the row a setting
+    --- lands in is the row that gets written back.
     local Settings = require("turbosearch_settings")
+    local instance = PluginLoader:getPluginInstance("turbosearch")
     local screen = Settings:new{
-        main = PluginLoader:getPluginInstance("turbosearch"),
+        main = instance,
+        index_path = INDEX,
     }
-    -- report returns a table plus an empty string, or nil plus a message, so
-    -- there are three things to separate: a raise, a refusal, and a report.
-    -- `pcall` puts the success flag first, which is what this got wrong first
-    -- time and reported a report as `true`.
-    local ok, result, message = pcall(screen.report, screen, self.settings_for_report)
+
+    -- Each call answers with a value plus a reason, so there are three things to
+    -- separate: a raise, a refusal, and an answer. `pcall` puts the success flag
+    -- first, which is what this got wrong the first time.
+    local ok, text, message = pcall(function() return instance:engine_config_text() end)
     if not ok then
-        logger.info("PROBE: settings report raised", tostring(result))
-    elseif type(result) ~= "table" then
-        logger.info("PROBE: settings refused", tostring(message))
+        logger.info("PROBE: settings config raised", tostring(text))
+    elseif not text then
+        logger.info("PROBE: settings config refused", tostring(message))
     else
-        logger.info("PROBE: settings index", result.index)
-        logger.info("PROBE: settings bytes", result.bytes)
-        logger.info("PROBE: settings terms", result.terms)
-        logger.info("PROBE: settings content", result.content)
-        logger.info("PROBE: settings warn", result.warn or "(none)")
+        local _, lines = text:gsub("[^\n]+", "")
+        logger.info("PROBE: settings config lines", lines)
+        logger.info("PROBE: settings index_depth", text:match("index_depth=([^\n]+)"))
+        logger.info("PROBE: settings content_mode", text:match("content_mode=([^\n]+)"))
     end
+
+    -- A setting that decides what is stored has to be refused rather than
+    -- applied, and the refusal is the whole transaction: nothing is written.
+    local applied, refuse = instance:engine_apply_config("content_mode=full")
+    logger.info("PROBE: settings refusal", tostring(applied), tostring(refuse))
+
+    -- The pane a setting lives in decides where it goes, so the file's path is
+    -- checked too: a path with nothing behind its extension would leave a
+    -- *relative* one, which is a settings record in whatever directory the
+    -- reader happened to be in.
+    logger.info("PROBE: settings env file", screen:env_file_path())
 
     -- The rows carry the field class the plugin's own rows do, so what follows
     -- is the plugin's path resolution and its open, against a real book.

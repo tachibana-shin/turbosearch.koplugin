@@ -355,6 +355,93 @@ pub unsafe extern "C" fn ts_term_count(handle: *mut TsIndex) -> i64 {
     }
 }
 
+/// The stored settings, as `key = value` lines.
+///
+/// Every setting the engine will act on, including the ones a build chooses rather
+/// than a query — `source_dirs`, `include_extensions`, `index_depth`,
+/// `prefix_mode`. The plugin shows them so that what an index was built with is not
+/// a thing you have to guess, and so that a settings screen can offer a field for
+/// each of them.
+///
+/// # Safety
+/// `handle` must come from [`ts_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_config_text(handle: *mut TsIndex) -> *mut c_char {
+    unsafe {
+        let Some(handle) = as_ref(handle) else {
+            set_error("ts_config_text: null handle");
+            return std::ptr::null_mut();
+        };
+        match handle.engine.config() {
+            Ok(cfg) => {
+                clear_error();
+                let mut body = String::new();
+                for (key, value) in cfg.to_lines() {
+                    body.push_str(&key);
+                    body.push('=');
+                    body.push_str(&value);
+                    body.push('\n');
+                }
+                to_c_string(&body)
+            }
+            Err(e) => {
+                set_error(&format!("ts_config_text: {e}"));
+                std::ptr::null_mut()
+            }
+        }
+    }
+}
+
+/// Applies settings lines, leaving the ones absent alone.
+///
+/// Returns [`TS_OK`], or a negative code with the reason in `ts_last_error`. The
+/// partial-merge rule matters for a plugin that has shown its own subset of the
+/// settings: a field it does not know about must survive the save.
+///
+/// `content_mode` is refused here — it changes what is stored, so the postings
+/// already in the index would be in the wrong shape for it. Both the plugin and
+/// the indexer set it when an index is built.
+///
+/// # Safety
+/// `handle` must come from [`ts_open`]; `text` must be a null-terminated UTF-8
+/// string or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_set_config_text(handle: *mut TsIndex, text: *const c_char) -> c_int {
+    unsafe {
+        let Some(handle) = as_ref(handle) else {
+            set_error("ts_set_config_text: null handle");
+            return TS_ERR_ARGUMENT;
+        };
+        let Some(text) = to_str(text) else {
+            set_error("ts_set_config_text: null or empty text");
+            return TS_ERR_ARGUMENT;
+        };
+
+        let mut cfg = match handle.engine.config() {
+            Ok(c) => c,
+            Err(e) => {
+                set_error(&format!("ts_set_config_text: {e}"));
+                return TS_ERR_QUERY;
+            }
+        };
+        if let Err(e) = cfg.merge_lines(text) {
+            set_error(&format!("ts_set_config_text: {e}"));
+            return TS_ERR_ARGUMENT;
+        }
+        let blob = cfg.encode();
+        match handle.engine.write_config_raw(&blob) {
+            Ok(()) => {
+                clear_error();
+                TS_OK
+            }
+            Err(e) => {
+                set_error(&format!("ts_set_config_text: {e}"));
+                TS_ERR_QUERY
+            }
+        }
+    }
+}
+
 fn search_impl(handle: &TsIndex, query: &str) -> crate::storage::RunResult<(*mut c_char, c_int)> {
     let result = query::search_phrase(handle.engine, &handle.dict, query)?;
     let buffer = lines_buffer(result.iter().map(|h| (h.doc_id, h.score)));

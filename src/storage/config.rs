@@ -62,6 +62,25 @@ impl PrefixMode {
             _ => None,
         }
     }
+
+    /// The name the text form uses, and the label a settings screen shows.
+    pub fn name(&self) -> &'static str {
+        match self {
+            PrefixMode::Auto => "auto",
+            PrefixMode::Exact => "exact",
+            PrefixMode::Prefix => "prefix",
+        }
+    }
+
+    /// Reads one of those names back.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(PrefixMode::Auto),
+            "exact" => Some(PrefixMode::Exact),
+            "prefix" => Some(PrefixMode::Prefix),
+            _ => None,
+        }
+    }
 }
 
 /// How many positions to keep per (term, document).
@@ -81,6 +100,25 @@ impl IndexDepth {
 
     pub fn is_full(&self) -> bool {
         self.0 == u32::MAX
+    }
+
+    /// The name the text form uses, or `None` for a stop somebody chose.
+    ///
+    /// The three measured settings are named because the third of them is
+    /// `u32::MAX`, and printing that would show a reader `4294967295` as though
+    /// it were a limit anyone picked. It is not a setting, it is how "keep them
+    /// all" is spelled — so it says `full`, and a number between the measured
+    /// three stays a number, which is what makes it editable.
+    pub fn name(&self) -> Option<&'static str> {
+        if self.0 == IndexDepth::FULL.0 {
+            Some("full")
+        } else if self.0 == IndexDepth::BALANCED.0 {
+            Some("balanced")
+        } else if self.0 == IndexDepth::LIGHT.0 {
+            Some("light")
+        } else {
+            None
+        }
     }
 }
 
@@ -187,6 +225,29 @@ pub struct Config {
     pub meta_only_unparseable: bool,
 }
 
+/// Reads a boolean the way a hand-edited settings file writes one.
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" | "" => Some(false),
+        _ => None,
+    }
+}
+
+/// Why a settings line could not be applied.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// A line without a `=`.
+    #[error("{0:?} is not a key = value line")]
+    Line(String),
+    /// A value the setting does not accept.
+    #[error("{0:?} does not accept that value")]
+    Value(String),
+    /// A setting that cannot be changed by rewriting the config.
+    #[error("{0:?} changes what is stored, so it can only be chosen when the index is built")]
+    ReadOnly(String),
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -286,6 +347,121 @@ impl Config {
             return false;
         }
         self.include_extensions.contains(&ext)
+    }
+
+    /// The settings as text, one `key = value` pair per line.
+    ///
+    /// [`Self::encode`] is for storage; this is for a reader. A setting is only
+    /// worth having if somebody can see it and change it, and a settings screen
+    /// cannot offer a field it cannot render. The format is the obvious one, so a
+    /// hand-edited file is a valid answer too.
+    ///
+    /// Lists are comma-separated: every list here holds names, and a name that
+    /// wants a comma can be quoted on the way in.
+    pub fn to_lines(&self) -> Vec<(String, String)> {
+        vec![
+            ("source_dirs", self.source_dirs.join(",")),
+            ("include_extensions", self.include_extensions.join(",")),
+            ("exclude_extensions", self.exclude_extensions.join(",")),
+            ("exclude_dir_globs", self.exclude_dir_globs.join(",")),
+            ("min_file_size", self.min_file_size.to_string()),
+            ("max_file_size", self.max_file_size.to_string()),
+            (
+                "index_depth",
+                self.index_depth
+                    .name()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| self.index_depth.0.to_string()),
+            ),
+            ("prefix_mode", self.prefix_mode.name().into()),
+            (
+                "index_only_when_charging",
+                self.index_only_when_charging.to_string(),
+            ),
+            (
+                "meta_only_unparseable",
+                self.meta_only_unparseable.to_string(),
+            ),
+            ("content_mode", self.content_mode.name().into()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect()
+    }
+
+    /// Applies the `key = value` lines in `text`, leaving anything absent alone.
+    ///
+    /// Partial on purpose. A settings screen sends back the fields it shows, and
+    /// treating a missing line as a request to reset that field would let an older
+    /// reader silently undo a newer setting it has no field for. An unknown key is
+    /// left alone for the same reason the other way round.
+    ///
+    /// `content_mode` is refused rather than applied: it decides what is stored, so
+    /// changing it would leave postings in the shape the old mode produced — the
+    /// results would come back from an index that no longer means what it says. The
+    /// refusal names the fix, which is to rebuild.
+    pub fn merge_lines(&mut self, text: &str) -> Result<(), ConfigError> {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(ConfigError::Line(line.to_string()));
+            };
+            let (key, value) = (key.trim(), value.trim());
+            let list = || -> Vec<String> {
+                value
+                    .split(',')
+                    .map(|part| part.trim().to_string())
+                    .filter(|part: &String| !part.is_empty())
+                    .collect()
+            };
+            match key {
+                "source_dirs" => self.source_dirs = list(),
+                "include_extensions" => self.include_extensions = list(),
+                "exclude_extensions" => self.exclude_extensions = list(),
+                "exclude_dir_globs" => self.exclude_dir_globs = list(),
+                "min_file_size" => {
+                    self.min_file_size =
+                        value.parse().map_err(|_| ConfigError::Value(key.into()))?;
+                }
+                "max_file_size" => {
+                    self.max_file_size =
+                        value.parse().map_err(|_| ConfigError::Value(key.into()))?;
+                }
+                "index_depth" => {
+                    // The three named settings are what a reader chooses between; a
+                    // bare number is accepted too, because `note.md` measured the
+                    // cost of each and somebody will want a stop between two.
+                    let depth = match value {
+                        "full" => IndexDepth::FULL,
+                        "balanced" => IndexDepth::BALANCED,
+                        "light" => IndexDepth::LIGHT,
+                        other => other
+                            .parse()
+                            .map(IndexDepth)
+                            .map_err(|_| ConfigError::Value(key.into()))?,
+                    };
+                    self.index_depth = depth;
+                }
+                "prefix_mode" => {
+                    self.prefix_mode = PrefixMode::from_name(value)
+                        .ok_or_else(|| ConfigError::Value(key.into()))?;
+                }
+                "index_only_when_charging" => {
+                    self.index_only_when_charging =
+                        parse_bool(value).ok_or_else(|| ConfigError::Value(key.into()))?;
+                }
+                "meta_only_unparseable" => {
+                    self.meta_only_unparseable =
+                        parse_bool(value).ok_or_else(|| ConfigError::Value(key.into()))?;
+                }
+                "content_mode" => return Err(ConfigError::ReadOnly(key.into())),
+                _ => {}
+            }
+        }
+        Ok(())
     }
 }
 

@@ -40,6 +40,10 @@ local record EngineBinding
    book_title: function(any, integer): string
    book_path: function(any, integer): string
    index_info: function(any): any
+   --- The whole config, as `key = value` lines.
+   config_text: function(any): string, string
+   --- Applies settings lines, leaving the rest alone.
+   apply_config: function(any, string): boolean, string
 end
 
 --- The Teal binding, which is what the engine is reached through.
@@ -192,6 +196,8 @@ local record Turbosearch
    fullname: string
    ui: UiModule
    result_menu: any
+   --- The settings screen, while it is open. See `onTurbosearchSettings`.
+   settings_screen: any
    --- The option checkboxes the popup is showing, if any. Held here rather than in
    --- a local so the callback that reads them can reach them.
    option_boxes: {OptionBox}
@@ -200,6 +206,10 @@ local record Turbosearch
    loadSettings: function(Turbosearch): SettingsFile
    engine: function(Turbosearch): EngineBinding
    readSearchOptions: function(Turbosearch): {string: any}
+   --- The settings screen calls these three on the plugin.
+   engine_config_text: function(Turbosearch): string, string
+   engine_apply_config: function(Turbosearch, string): boolean, string
+   settings_index_path: function(Turbosearch): string
    onDispatcherRegisterActions: function(Turbosearch)
    addToMainMenu: function(Turbosearch, {string: any})
    onTurbosearchSearch: function(Turbosearch)
@@ -304,13 +314,84 @@ function Turbosearch:addToMainMenu(menu_items: {string: any})
    }
 end
 
+--- The stored config as text, for the settings screen.
+---
+--- Goes through the same handle a search uses, because the engine is open once and
+--- the settings are a second question asked of it.
+function Turbosearch:engine_config_text(): string, string
+   local engine = self:engine()
+   if not engine then
+      return nil, engine_error
+   end
+   local handle, err = engine.open_index(
+      self:loadSettings():readSetting("index_path", "") as string)
+   if not handle then
+      return nil, tostring(err)
+   end
+   --- The handle is a borrow, so the config is read through it and the handle
+   --- closed, rather than the other way round.
+   local ok: boolean
+   local text: string
+   local reason: string
+   ok, text, reason = pcall(engine.config_text, handle)
+   engine.close(handle)
+   if not ok then
+      return nil, tostring(text)
+   end
+   if text == nil then
+      return nil, tostring(reason)
+   end
+   return text, ""
+end
+
+--- Applies settings lines, for the settings screen.
+function Turbosearch:engine_apply_config(text: string): boolean, string
+   local engine = self:engine()
+   if not engine then
+      return false, engine_error
+   end
+   local handle, err = engine.open_index(
+      self:loadSettings():readSetting("index_path", "") as string)
+   if not handle then
+      return false, tostring(err)
+   end
+   local ok: boolean
+   local applied: boolean
+   local reason: string
+   ok, applied, reason = pcall(engine.apply_config, handle, text)
+   engine.close(handle)
+   if not ok then
+      return false, tostring(applied)
+   end
+   if not applied then
+      return false, tostring(reason)
+   end
+   return true, ""
+end
+
+--- The index the settings are about.
+function Turbosearch:settings_index_path(): string
+   return self:loadSettings():readSetting("index_path", "") as string
+end
+
 --- Opens the settings popup.
 ---
 --- A separate entry point rather than a branch of the search one, so a reader who
 --- wants to know what an index holds does not have to dismiss a query box first.
 function Turbosearch:onTurbosearchSettings(return_to_search: boolean)
-   local screen = Settings:new{ main = self, return_to_search = return_to_search }
-   screen:show()
+   local screen = Settings:new{
+      main = self,
+      return_to_search = return_to_search,
+      pane = "config",
+      index_path = self:loadSettings():readSetting("index_path", "") as string,
+   }
+   --- Kept on the plugin rather than left local, because a settings screen is a
+   --- round trip: the reader comes back to it from wherever the search went, and
+   --- a screen nothing holds is a screen nothing can put back.
+   self.settings_screen = screen
+   --- `reload` rather than `show`, because the first thing a settings screen owes
+   --- a reader is what is in force, not what it was last time.
+   screen:reload()
 end
 
 --- Shows the query box, pre-filled with the last query so a follow-up search is

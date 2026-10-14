@@ -49,10 +49,10 @@ package.path = PLUGIN_DIR .. "?.lua;" .. package.path
             -- hides the one thing worth reading.
             if args.title == _("Search in books") then
                 captured.dialog = args
-            elseif args.buttons then
-                captured.popup = args
             elseif args.item_table then
                 captured.menu = args
+            elseif args.buttons then
+                captured.popup = args
             else
                 captured.info = args
             end
@@ -89,6 +89,52 @@ package.path = PLUGIN_DIR .. "?.lua;" .. package.path
     package.preload["ui/widget/menu"] = loader(widgets)
     package.preload["ui/widget/confirmbox"] = loader(widgets)
     package.preload["ui/widget/buttondialog"] = loader(widgets)
+    -- Measuring, not drawing: the plugin sizes the right-hand column from the
+    -- screen it is on rather than from a count of characters, and this is the
+    -- seam where that shows.
+    package.preload["device"] = loader({
+        screen = {
+            getWidth = function(self) return 1072 end,
+            getHeight = function(self) return 1448 end,
+            scaleBySize = function(self, value) return value end,
+        },
+    })
+    package.preload["ui/font"] = loader({
+        getFace = function(self, name, size) return { name = name, size = size } end,
+    })
+    -- About eight pixels a character in `infont` at this size: enough for the
+    -- test to tell "fits" from "does not" without a font engine behind it.
+    local function fits(text, width)
+        return #text <= math.floor(width / 8)
+    end
+
+    package.preload["ui/rendertext"] = loader({
+        --- Hands back the part of the value that fits, unchanged — the question
+        --- a caller asks before it decides that anything needs a mark.
+        getSubTextByWidth = function(self, text, face, width, kerning, bold)
+            if fits(text, width) then
+                return text
+            end
+            return text:sub(1, math.floor(width / 8))
+        end,
+
+        --- Records what was asked to be shortened, and returns it whole: the
+        --- test wants to know which values were treated as too wide, and the
+        --- reader's own ellipsis is the reader's to draw.
+        truncateTextByWidth = function(self, text, face, width, kerning, bold)
+            captured.column_marked = captured.column_marked or {}
+            captured.column_marked[#captured.column_marked + 1] = text
+            -- Keep the longest one seen: every row passes through here, and it
+            -- is the long value — forty extensions, a whole path — that a
+            -- caller with a character budget would have sliced before this.
+            if not captured.column_input or #text > #captured.column_input then
+                captured.column_input = text
+            end
+            captured.column_budget = width
+            captured.column_face = face
+            return text
+        end,
+    })
     package.preload["luasettings"] = loader({
         --- A fresh object per open, the way the real one has a file behind it.
         open = function(_, _path)
@@ -272,28 +318,113 @@ captured.opened = nil
 instance:openBook(path)
 check("selecting a row opens that file", captured.opened == path, captured.opened)
 
-io.write("\nsettings popup\n")
+io.write("\nsettings screen\n")
 
-captured.popup = nil
-captured.info = nil
-instance:onTurbosearchSettings()
-check("the settings open as a popup, not a menu", captured.popup ~= nil,
-    captured.info and captured.info.text or "nothing was shown")
-check("the popup reports the index it points at",
-    captured.popup and captured.popup.title
-        and captured.popup.title:find(INDEX, 1, true) ~= nil,
-    captured.popup and captured.popup.title)
-check("the popup reports the size in a unit a reader can act on",
-    captured.popup and captured.popup.title:find("MB", 1, true) ~= nil,
-    captured.popup and captured.popup.title)
-check("the popup has a button for the thing that can change",
-    captured.popup and captured.popup.buttons
-        and captured.popup.buttons[1] and captured.popup.buttons[1][1]
-        and captured.popup.buttons[1][1].text ~= nil)
-local close_row = captured.popup and captured.popup.buttons[2]
-check("the popup has a close button",
-    close_row and close_row[1] and close_row[1].text:find("Close", 1, true),
-    close_row and close_row[1] and close_row[1].text)
+-- The stub host answers with the same lines the engine would, so the screen
+-- renders real rows rather than empty ones.
+local function stub_host(overrides)
+   local text = table.concat({
+      "source_dirs=/mnt/us/documents",
+      -- The long ones are the point: a real index carries forty extensions and
+      -- a dozen folders to skip, and those are the values a column sized by a
+      -- character budget would have had to throw away.
+      "include_extensions=epub,kepub,mobi,azw,azw3,txt,text,md,markdown,fb2,html,xhtml",
+      "exclude_extensions=log,lua,json,opf,ncx,css,js,db,bak,tmp,old,swp,sdr,toc,cover,png,jpg,gif,webp,bmp,ico,svg,mp3,ttf,zip,gz,pdf,djvu,cbz,cbr",
+      "exclude_dir_globs=*.sdr,.calibrece,.thumbnails,@eaDir,__MACOSX",
+      "min_file_size=5120",
+      "max_file_size=67108864",
+      "index_depth=32",
+      "prefix_mode=auto",
+      "index_only_when_charging=true",
+      "meta_only_unparseable=false",
+      "content_mode=full",
+   }, "\n")
+   return {
+      engine_config_text = function(self) return text, "" end,
+      engine_apply_config = function(self, t) return true, "" end,
+      onTurbosearchSearch = function(self) end,
+   }
+end
+
+local Settings = dofile("/home/shin/turbosearch/build/turbosearch.koplugin/turbosearch_settings.lua")
+--- The index path the env file is derived from comes from the host, the way the
+--- plugin hands it over, rather than being invented here.
+local host = stub_host()
+host.index_path = function(self) return "/tmp/opencode/turbosearch-test.idx" end
+--- The path arrives with the screen, the way the plugin hands it over.
+local screen = Settings.new(Settings, {
+   main = host, pane = "config", index_path = "/tmp/opencode/turbosearch-test.idx",
+})
+captured.menu = nil
+screen:reload()
+local items = captured.menu and captured.menu.item_table or {}
+check("the settings open as a screen with one row per setting", #items == 11,
+    #items .. " rows")
+check("a row shows what is in force, in the right-hand column",
+    items[7] and items[7].mandatory == "32" and items[7].text ~= nil,
+    items[7] and items[7].mandatory)
+check("a choice setting is a choice, not a text field",
+    items[8] and items[8].setting.edit == "choice",
+    items[8] and items[8].setting.edit)
+
+-- The column is sized by the screen it is on, in the face it will be painted
+-- in, and the plugin hands the whole value over to be shortened rather than
+-- slicing it first: a character budget in the caller is how forty-eight
+-- characters came to be wider than the row and take the screen down.
+check("the column is measured against the screen, not a character count",
+    captured.column_budget and captured.column_budget > 0
+        and captured.column_budget < 1072,
+    captured.column_budget)
+check("the value reaches the measurement whole, to be shortened there",
+    captured.column_input and #captured.column_input > 48,
+    captured.column_input and (#captured.column_input .. " chars"))
+check("the column is measured in the face it is drawn in",
+    captured.column_face and captured.column_face.name == "infont"
+        and captured.column_face.size == 16,
+    captured.column_face and captured.column_face.name)
+
+-- The reader appends its ellipsis whether or not it cut anything, so calling it
+-- blind marks every row — `5120…`, `auto…`, `full…` — and a mark that is always
+-- there says nothing. Only a value that genuinely does not fit may end in one.
+local marked = captured.column_marked or {}
+local short_marked = {}
+for _, value in ipairs(marked) do
+    if #value <= 8 then short_marked[#short_marked + 1] = value end
+end
+check("a value that fits is shown whole, with no mark",
+    #short_marked == 0, table.concat(short_marked, ", "))
+check("a value that does not fit is the one that gets marked",
+    #marked > 0 and #marked < 11, #marked .. " of 11 rows marked")
+
+-- The env pane writes a file the next indexer run will read, and a variable
+-- already in the environment still wins over it.
+local env_file = "/tmp/opencode/turbosearch-test.env"
+screen.pane = "env"
+screen:save("env")
+local written = io.open(env_file, "r")
+local body = written and written:read("a") or ""
+if written then written:close() end
+check("the env pane writes a file with one line per setting",
+    body:find("CONTENT_MODE", 1, true) ~= nil and body:find("MAX_BOOKS", 1, true) ~= nil,
+    body)
+check("the env file says the real environment still wins",
+    body:find("wins", 1, true) ~= nil, body)
+
+-- The settings file sits beside the index, so a path with nothing behind its
+-- extension has no such place. The version that answered `.env` anyway wrote a
+-- *relative* path — into whatever directory the test ran from, which is how this
+-- project's own build-time `.env` came to hold a settings record instead of the
+-- sqlx `DATABASE_URL`.
+screen.index_path = ".idx"
+check("a path with nothing behind its extension has no settings file",
+    screen:env_file_path() == "", screen:env_file_path())
+screen.index_path = ""
+check("an empty index path has no settings file either",
+    screen:env_file_path() == "", screen:env_file_path())
+screen.index_path = "/tmp/opencode/turbosearch-test.idx"
+check("a real index path does have one",
+    screen:env_file_path() == "/tmp/opencode/turbosearch-test.env",
+    screen:env_file_path())
 
 io.write("\nrebuilding the menu\n")
 -- The handle is closed before the menu is built, so a second search must work

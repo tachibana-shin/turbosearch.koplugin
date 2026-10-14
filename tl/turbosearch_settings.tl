@@ -1,305 +1,446 @@
--- Settings, and everything the engine can be asked about itself.
+-- Settings: every configuration the engine acts on, and every environment
+-- variable it reads.
 --
--- Kept apart from the plugin's own file because it talks to an index rather than
--- to a book, and because it is the half a reader arrives at wanting an answer
--- rather than a search.
+-- One screen, one list, no wizard. The settings used to be a report screen and
+-- then a configure screen behind a button, which was two hops to reach a text
+-- field, and the two screens existed because half of what they showed was not
+-- configurable at all. Now everything reachable is a row on the one screen, and
+-- what cannot be changed is said so rather than hidden.
 --
--- A popup, not a menu: every other plugin on this reader shows its settings as
--- one, and with reason — the settings are something to glance at, act on and be
--- rid of, and a full-screen list is the wrong shape for five lines of
--- information. The report sits in the title, where a popup puts what it is about,
---- and each button carries an icon from the reader's own set, so a reader scanning
---- for the one they want finds it by shape before reading any text.
+-- Two panes, because a setting has two homes:
+--
+--   `config` is a record in the database the engine reads back on open. File
+--   selection and query behaviour live there, so a change is in force the next
+--   time anything opens the index.
+--
+--   `env` is what the indexer was started with. A settings screen cannot reach
+--   into a running process, so it records what the *next* run should use, in
+--   `<index>.env` beside the index. A variable already set in the environment
+--   wins over that file, so a one-off run from a shell still behaves — which is
+--   why the pane is named for the run rather than for the value.
+--
+-- Every row is one item in a list rather than a bespoke widget per setting,
+-- because there are a dozen of them in four kinds — text, list, number, choice —
+-- and one editing path is easier to follow than four.
 
-local ButtonDialog = require("ui/widget/buttondialog")
-local CheckButton = require("ui/widget/checkbutton")
-local InputDialog = require("ui/widget/inputdialog")
 local ConfirmBox = require("ui/widget/confirmbox")
+local Device = require("device")
+local Font = require("ui/font")
 local InfoMessage = require("ui/widget/infomessage")
+local InputDialog = require("ui/widget/inputdialog")
+local Menu = require("ui/widget/menu")
+local RenderText = require("ui/rendertext")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local ffiUtil = require("ffi/util")
 local _ = require("gettext") as function(string): string
 local T = ffiUtil.template
 
--- The part of the plugin this screen reaches for: the engine it loads through, and
---- the settings file it keeps.
---- What the index says about itself, as the binding reports it.
-local record IndexInfo
-   bytes: number
-   terms: number
-   mode: string
-end
-
-local record EngineBinding
-   open_index: function(string): any, string
-   index_info: function(any): IndexInfo
-   close: function(any)
-end
-
-local record SettingsFile
-   data: {any: any}
-   readSetting: function(SettingsFile, string, any): any
-   saveSetting: function(SettingsFile, string, any)
-   flush: function(SettingsFile)
-end
-
---- The settings dialog, and the calls made through it.
-local record SettingsDialog
-   getInputText: function(SettingsDialog): string
-   addWidget: function(SettingsDialog, any)
-   onShowKeyboard: function(SettingsDialog)
-end
-
---- One option checkbox, and the state it holds.
-local record OptionBox
-   text: string
-   checked: boolean
-   parent: any
-end
-
-local record SettingsHost
-   engine: function(any): EngineBinding
-   loadSettings: function(any): SettingsFile
-   --- Reopens the query box, so that leaving settings entered from it returns the
-   --- reader to the keyword they had typed rather than to the book list.
-   show_search: function(any)
-end
-
--- The warning travels with the report, so the screen can decide whether it
--- deserves a row of its own.
-local record IndexReport
-   index: string
-   bytes: number
-   terms: number
-   content: string
-   mode: string
-   warn: string
-end
-
--- Icons, from KOReader's own set.
----
--- Named rather than drawn because an icon that ships with the reader renders in
--- whatever style the reader is using, and one that does not shows as a placeholder.
 --- Icons, as text rather than images — see tl/plugin.tl for why.
 local ICON_SETTINGS: string = ""
-local ICON_FOLDER: string = ""
 local ICON_CLOSE: string = ""
 
--- Sizes a byte count in a unit a reader can act on.
-local function format_bytes(bytes: number): string
-   if bytes < 1024 then
-      return T(_("%1 B"), bytes)
-   end
-   if bytes < 1024 * 1024 then
-      return T(_("%1 kB"), math.floor(bytes / 1024))
-   end
-   return string.format("%.1f MB", bytes / (1024 * 1024))
+--- One settings row.
+local record Setting
+   --- The key as the engine spells it, also the line the file holds.
+   key: string
+   --- What it is, shown as the row's text.
+   label: string
+   --- What is in force, shown as the right-hand column.
+   value: string
+   --- How a new value is entered.
+   edit: string
+   choices: {string}
 end
 
--- Describes the search mode the way the query box's hint does.
-local function mode_short(mode: string): string
-   if mode == "Metadata" then
-      return _("Title, author, series")
-   end
-   if mode == "Pattern" then
-      return _("Pattern")
-   end
-   return _("Book text")
+--- The box a single value is typed into, and the calls made through it.
+---
+--- The settings menu is a plain `any` because its rows are the caller's shape to
+--- declare; this one is worth naming, because the value typed into it is read
+--- back through two calls and a rename of either should be an error here.
+local record ValueBox
+   getInputText: function(ValueBox): string
+   onShowKeyboard: function(ValueBox)
 end
 
--- Describes how much content the index holds.
-local function content_short(mode: string): string
-   if mode == "FileList" then
-      return _("File list only")
-   end
-   if mode == "TermsOnly" then
-      return _("Terms, no positions")
-   end
-   return _("Full text")
+--- One row of the list, and the setting it was built from.
+local record Row
+   text: string
+   mandatory: string
+   setting: Setting
 end
 
+--- The plugin, as far as this screen is concerned.
+local record SettingsHost
+   --- The stored config as text, or nil plus a reason.
+   engine_config_text: function(SettingsHost): string, string
+   --- Applies `key = value` lines, leaving the rest alone.
+   engine_apply_config: function(SettingsHost, string): boolean, string
+   --- Reopens the query box, which is where the round trip ends.
+   onTurbosearchSearch: function(SettingsHost)
+end
+
+--- The settings screen.
 local record Settings
-   --- Inherited from the reader's widget base through the metatable set below, and
-   --- declared here because a record's type cannot see its metatable.
    new: function(any, any): Settings
+
    main: SettingsHost
-   --- Where settings were opened from, and what to do when they are left.
+   rows: {Setting}
+   env_rows: {Setting}
+   pane: string
+   --- The index being configured, and the env file beside it.
+   index_path: string
+   env_file: string
    return_to_search: boolean
 
-   report: function(Settings): IndexReport, string
+   reload: function(Settings)
    show: function(Settings)
-   configure: function(Settings)
+   edit: function(Settings, Setting, string)
+   save: function(Settings, string)
+end
+
+--- The marker a choice row carries when it is already in force.
+---
+--- A local rather than the translator called inline, because Teal reads a bare
+--- `_(...)` as indexing a value that is not there.
+local function mark_now(_choice: string): string
+   return _("now")
+end
+
+--- Where the env file is: the index path, with `env` in place of its extension.
+---
+--- A method rather than a free function, because the path is the plugin's setting
+--- and arrives with the screen. A caller that never set one has nowhere to put a
+--- file and no run to read it, so the answer is empty rather than a made-up path.
+function Settings:env_file_path(): string
+   if self.index_path == nil then
+      return ""
+   end
+   --- The settings file sits beside the index, so it is the index with `env` in
+   --- place of its extension. A path with no name behind the extension leaves
+   --- nothing to substitute, and the `.env` that followed was a *relative* path
+   --- — written into whatever directory the reader happened to be in, which is
+   --- how this project's own build-time `.env` came to be replaced by a
+   --- settings record. Empty is the only honest answer there is nowhere else.
+   local stem: string = (self.index_path:gsub("%.[^%.]+$", ""))
+   if stem == "" then
+      return ""
+   end
+   return stem .. ".env"
+end
+
+--- The face the right-hand column is drawn in, and the size it is drawn at.
+---
+--- Set on the menu as well as measured in, so the two cannot drift apart: a
+--- column measured in one face and painted in another has only guessed, and a
+--- guess about width is the one thing a layout cannot afford.
+local MANDATORY_FONT_SIZE: integer = 16
+
+--- How much of a row the value may take, as a share of the screen.
+---
+--- Two fifths leaves the label the rest, which fits "Folders to index" at the
+--- font the menu draws it in. The share is of the *screen* rather than a number
+--- of characters because a character is eight pixels on one device and twelve
+--- on another, and only the pixels decide: forty-eight characters sounded small
+--- and was in fact the whole width of the row, which is what squeezed the label
+--- to zero and took the screen down with it.
+local MANDATORY_SHARE: number = 0.4
+
+--- The value as it fits: measured in pixels, shortened, and given an ellipsis.
+---
+--- Measured rather than sliced, so `exclude_extensions` — forty names long —
+--- occupies exactly as much of the row as a short value would, and what is left
+--- of it is what a reader can still see without opening the row. What is cut off
+--- is not lost: tapping the row opens the whole value, which is where a setting
+--- is read properly anyway.
+local function column_of(value: string): string
+   if value == "" then
+      return ""
+   end
+   local face = Font:getFace("infont", MANDATORY_FONT_SIZE)
+   local budget = math.floor(Device.screen:getWidth() * MANDATORY_SHARE)
+
+   --- `truncateTextByWidth` appends its ellipsis whether or not it cut anything,
+   --- so calling it alone marks every short value — `auto`, `full`, `5120` — as
+   --- though something were being held back. A mark that is always there carries
+   --- no information at all, which is the opposite of what it is for; measuring
+   --- first is what makes it mean "there is more here than you can see".
+   if RenderText:getSubTextByWidth(value, face, budget, true, false) == value then
+      return value
+   end
+   return RenderText:truncateTextByWidth(value, face, budget, true, false)
+end
+
+--- Reads the `key = value` pairs out of `text`.
+local function pairs_of(text: string): {string: string}
+   local out: {string: string} = {}
+   for line in (text .. "\n"):gmatch("(.-)\n") do
+      local key, value = line:match("^([^=]+)=(.*)$")
+      if key then
+         out[key:match("^%s*(.-)%s*$")] = value:match("^%s*(.-)%s*$")
+      end
+   end
+   return out
+end
+
+--- The config rows: everything the engine acts on, in the order a reader asks.
+local function config_rows(text: string): {Setting}
+   local by_key = pairs_of(text)
+
+   local function row(key: string, label: string, choices: {string}): Setting
+      return {
+         key = key,
+         label = label,
+         value = by_key[key] or "",
+         edit = choices and #choices > 0 and "choice" or "text",
+         choices = choices or ({} as {string}),
+      }
+   end
+
+   return {
+      row("source_dirs", _("Folders to index"), {} as {string}),
+      row("include_extensions", _("File types to index"), {} as {string}),
+      row("exclude_extensions", _("File types to skip"), {} as {string}),
+      row("exclude_dir_globs", _("Folders to skip"), {} as {string}),
+      row("min_file_size", _("Smallest file (bytes)"), {} as {string}),
+      row("max_file_size", _("Largest file (bytes)"), {} as {string}),
+      row("index_depth", _("Positions kept per term"),
+         { "full", "balanced", "light" } as {string}),
+      row("prefix_mode", _("Expand a prefix query"),
+         { "auto", "exact", "prefix" } as {string}),
+      row("index_only_when_charging", _("Only index while charging"),
+         { "true", "false" } as {string}),
+      row("meta_only_unparseable", _("Index metadata for unreadable files"),
+         { "true", "false" } as {string}),
+      row("content_mode", _("What is stored"), {} as {string}),
+   }
+end
+
+--- The env rows: what the next indexer run will use.
+local function env_rows(path: string): {Setting}
+   local handle = io.open(path, "r")
+   local text: string = ""
+   if handle then
+      text = handle:read("a") or ""
+      handle:close()
+   end
+   local by_key = pairs_of(text)
+
+   local function row(key: string, label: string): Setting
+      return {
+         key = key,
+         label = label,
+         value = by_key[key] or "",
+         edit = "text",
+         choices = {} as {string},
+      }
+   end
+
+   return {
+      row("CONTENT_MODE", _("What to store: full, terms or files")),
+      row("MAX_BOOKS", _("Index at most this many books")),
+      row("SEARCH", _("Phrase to try once indexing is done")),
+      row("META_SEARCH", _("Metadata to try once indexing is done")),
+      row("FRESH", _("Discard the index and build it again")),
+   }
+end
+
+--- Writes the env rows back.
+---
+--- The whole pane rather than the one row that changed, so a write cannot leave
+--- the file and the screen holding different things.
+local function write_env(path: string, rows: {Setting})
+   if path == "" then
+      --- No index to sit beside means nowhere to put the record, and anywhere
+      --- else would be a settings file no run would ever read.
+      return
+   end
+   local lines: {string} = {
+      "# What the next indexer run reads. A variable set in the environment wins",
+      "# over this file, so a one-off run from a shell still behaves.",
+   }
+   for _, setting in ipairs(rows) do
+      lines[#lines + 1] = setting.key .. "=" .. setting.value
+   end
+   local handle = io.open(path, "w")
+   if handle then
+      handle:write(table.concat(lines, "\n") .. "\n")
+      handle:close()
+   end
 end
 
 setmetatable(Settings, { __index = WidgetContainer })
 
--- Opens the index briefly and reports what it holds.
+--- Reloads what is in force, then shows it.
 ---
--- The handle is closed before anything is shown, for the same reason the search
--- path closes it: a settings popup holding a database open while the reader reads
--- it is a database open while the reader is doing something else.
-function Settings:report(): IndexReport, string
-   local engine = (self.main as SettingsHost):engine()
-   if not engine then
-      return nil as IndexReport, _("The engine could not be loaded.")
-   end
-
-   local settings: SettingsFile = (self.main as SettingsHost):loadSettings()
-   local index_path: string = settings:readSetting("index_path", "") as string
-   --- The binding reports a failed open as a message rather than a raise, so a
-   --- missing index is a row in the reader rather than a dead one.
-   local handle: any
-   local open_err: string
-   handle, open_err = engine.open_index(index_path)
-   if not handle then
-      return nil as IndexReport, T(_("Could not open the index at %1.\n\n%2"),
-         index_path, open_err)
-   end
-
-   local info = engine.index_info(handle)
-   engine.close(handle)
-
-   -- A content mode that cannot answer the mode chosen is worth saying rather
-   -- than leaving a reader to find out by typing a query.
-   local warn: string = ""
-   if info.mode == "FileList" then
-      warn = _("This index is only a list of files, so it has no text to search. \
-Build one with CONTENT_MODE=terms or full.")
-   elseif info.mode == "TermsOnly" then
-      warn = _("This index has no positions, so phrases in quotes will not match. \
-Switch to a loose query, or rebuild the index.")
-   end
-
-   return {
-      index = index_path,
-      bytes = math.floor(info.bytes),
-      terms = info.terms,
-      content = content_short(info.mode),
-      mode = mode_short(settings:readSetting("search_mode", "Text") as string),
-      -- The warning is carried on the report rather than shown here, because the
-      -- screen decides whether a warning deserves its own row.
-      warn = warn,
-   } as IndexReport, ""
-end
-
--- Opens the settings popup.
-function Settings:show()
-   local report, err = self:report()
-   if not report then
+--- Reloads rather than caching, because the engine may be holding a different
+--- record than the file: a settings screen that shows what it last wrote is one
+--- that can quietly lie about what is in force.
+function Settings:reload()
+   local host: SettingsHost = self.main
+   local text: string
+   local err: string
+   text, err = host:engine_config_text()
+   if not text then
       UIManager:show(ConfirmBox:new{
          title = _("Book search"),
-         text = err,
+         text = T(_("There is no index to read settings from.\n\n%1"), tostring(err)),
          icon = "texture-box",
          ok_text = _("Close"),
       } as any)
       return
    end
+   self.rows = config_rows(text)
+   self.env_file = self:env_file_path()
+   self.env_rows = env_rows(self.env_file)
+   self:show()
+end
 
-   -- The report goes in the title, where a popup puts what it is about. Each line
-   -- is a fact to read and none is something to tap, so none of them is a button.
-   local title: string = _("Book search") .. "\n\n"
-      .. _("Index") .. "  " .. report.index .. "\n"
-      .. _("Size") .. "  " .. format_bytes(report.bytes) .. "\n"
-      .. _("Terms") .. "  " .. string.format("%d", math.floor(report.terms)) .. "\n"
-      .. _("Content") .. "  " .. report.content .. "\n"
-      .. _("Query means") .. "  " .. report.mode
+--- Shows the pane that is currently selected.
+function Settings:show()
+   local items: {any} = {}
+   local title: string
+   local what: string = self.pane
 
+   if what == "env" then
+      title = T(_("Next run — %1 settings"), _("indexer"))
+      for _, setting in ipairs(self.env_rows) do
+         items[#items + 1] = {
+            text = setting.label,
+            mandatory = column_of(setting.value),
+            setting = setting,
+         }
+      end
+   else
+      title = _("Stored — what the engine acts on")
+      for _, setting in ipairs(self.rows) do
+         items[#items + 1] = {
+            text = setting.label,
+            mandatory = column_of(setting.value),
+            setting = setting,
+         }
+      end
+   end
+
+   local pane = self.pane
    local dialog: any
-   dialog = ButtonDialog:new{
-      title = title,
-      -- Two buttons on one row, and a close under them, so the popup is two taps
-      --- tall and does not scroll.
+   dialog = Menu:new{
+      title = ICON_SETTINGS .. "  " .. _("Book search settings"),
+      --- The pane's name, on one line: a menu measures its subtitle before it
+      --- lays it out, and a line it cannot measure is a refused screen.
+      subtitle = title,
+      item_table = items,
+      covers_full_width = true,
+      --- The right column is drawn in this face, and it is set rather than left
+      --- to the menu's own default so that the measurement above and the widget
+      --- that finally paints it agree.
+      items_mandatory_font_size = MANDATORY_FONT_SIZE,
+      onMenuSelect = function(_menu, item: Row)
+         self:edit(item.setting, pane)
+      end,
+      --- One button, because the only thing left to do on a settings screen is
+      --- leave — and leaving is where the round trip ends.
       buttons = {
          {
             {
-               text = ICON_SETTINGS .. "  " .. _("Settings"),
-               callback = function()
-                  UIManager:close(dialog)
-                  self:configure()
-               end,
-            },
-            {
-               text = ICON_FOLDER .. "  " .. _("Index"),
-               callback = function()
-                  UIManager:close(dialog)
-                  UIManager:show(InfoMessage:new{ text = report.index } as any)
-               end,
-            },
-         },
-         {
-            {
-               --- The round trip ends here: back to the keyword the reader had
-               --- typed, rather than to the book list.
                text = ICON_CLOSE .. "  " .. _("Close"),
                callback = function()
                   UIManager:close(dialog)
                   if self.return_to_search then
-                     (self.main as SettingsHost).show_search(self.main)
+                     (self.main as SettingsHost):onTurbosearchSearch()
                   end
                end,
             },
          },
       },
    } as any
+
    UIManager:show(dialog)
 end
 
--- Everything the plugin can be told to do differently.
---
--- The options that used to be a mode picker are now checkboxes on the search popup,
---- where a reader already is, so what is left here is the configuration: which index
---- to read, and what the checkboxes start out as next time.
---
---- A text field, two checkboxes, and Save, in one popup, because the settings are a
---- handful of values and not a tree.
-function Settings:configure()
-   local settings: SettingsFile = (self.main as SettingsHost):loadSettings()
+--- Edits one setting.
+---
+--- A choice is a list to pick from; anything else is a text field. The pane is
+--- remembered so the save lands in the record the value was read from, which is
+--- the difference between writing to the database and writing to the file.
+function Settings:edit(setting: Setting, pane: string)
+   if setting.edit == "choice" then
+      local dialog: any
+      local items: {any} = {}
+      for _, choice in ipairs(setting.choices) do
+         items[#items + 1] = {
+            text = choice,
+            mandatory = choice == setting.value and mark_now(choice) or "",
+            callback = function()
+               setting.value = choice
+               UIManager:close(dialog)
+               self:save(pane)
+            end,
+         }
+      end
+      dialog = Menu:new{
+         title = setting.label,
+         subtitle = T(_("Now") .. ": %1", setting.value),
+         item_table = items,
+         covers_full_width = true,
+      } as any
+      UIManager:show(dialog)
+      return
+   end
 
-   --- The two options, declared before the dialog that closes over them.
-   local metadata_box: OptionBox
-   local pattern_box: OptionBox
-
-   local dialog: SettingsDialog
-   dialog = InputDialog:new{
-      title = _("Book search settings"),
-      input = settings:readSetting("index_path", "") as string,
-      description = _("The index to read, built by the `indexer` tool in this repository."),
+   local input: ValueBox
+   input = InputDialog:new{
+      title = setting.label,
+      input = setting.value,
+      description = setting.key,
       buttons = {
          {
             {
-               text = _("Save"),
+               text = _("Cancel"),
                callback = function()
-                  settings:saveSetting("index_path", dialog:getInputText())
-                  settings:saveSetting("opt_metadata", metadata_box.checked)
-                  settings:saveSetting("opt_pattern", pattern_box.checked)
-                  settings:flush()
-                  UIManager:close(dialog)
-                  self:show()
+                  UIManager:close(input)
+               end,
+            },
+            {
+               text = _("Save"),
+               is_enter_default = true,
+               callback = function()
+                  setting.value = input:getInputText()
+                  UIManager:close(input)
+                  self:save(pane)
                end,
             },
          },
       },
-   } as SettingsDialog
+   } as ValueBox
+   UIManager:show(input)
+   input:onShowKeyboard()
+end
 
-   --- Each checkbox is an option the popup carries, so what it starts as next time
-   --- is part of the configuration rather than a thing to remember.
-   metadata_box = CheckButton:new{
-      text = _("Metadata only"),
-      checked = settings:readSetting("opt_metadata", false) as boolean,
-      parent = dialog,
-   } as OptionBox
-   dialog:addWidget(metadata_box)
+--- Writes the pane back, then shows it again with what is now in force.
+function Settings:save(pane: string)
+   if pane == "env" then
+      write_env(self.env_file, self.env_rows)
+      self.env_rows = env_rows(self.env_file)
+      self:show()
+      return
+   end
 
-   pattern_box = CheckButton:new{
-      text = _("Regular expression"),
-      checked = settings:readSetting("opt_pattern", false) as boolean,
-      parent = dialog,
-   } as OptionBox
-   dialog:addWidget(pattern_box)
-
-   UIManager:show(dialog)
-   dialog:onShowKeyboard()
+   --- The config pane is applied as a partial change: the rows the engine does not
+   --- let a reader set are left exactly as they were.
+   local host: SettingsHost = self.main
+   local lines: {string} = {}
+   for _, setting in ipairs(self.rows) do
+      lines[#lines + 1] = setting.key .. "=" .. setting.value
+   end
+   local ok: boolean
+   local err: string
+   ok, err = host:engine_apply_config(table.concat(lines, "\n"))
+   if not ok then
+      UIManager:show(InfoMessage:new{ text = tostring(err) } as any)
+      return
+   end
+   self:reload()
 end
 
 return Settings
