@@ -53,6 +53,30 @@ local SHOW_DIALOG = MODE == "show"
 local SHOW_SETTINGS = MODE == "settings"
 local RUN_INDEX = MODE == "index"
 
+--- Points the plugin at this run's index, and hands the reader's own back.
+---
+--- Not a courtesy. The reader's index path is the reader's, and leaving it
+--- aimed at a scratch file in /tmp takes the reader's index away on the next
+--- reboot — silently, in a file the reader never opens — which is how a probe
+--- ends up costing somebody the thing it was written to test.
+---
+--- The function it returns puts it back, so every way out of a probe can reach
+--- it: a probe has more early returns than it has steps.
+local function aim_at(instance)
+    local settings = instance:loadSettings()
+    local was = settings:readSetting("index_path", "")
+    settings:saveSetting("index_path", INDEX)
+    settings:flush()
+    logger.info("PROBE: indexing into", settings:readSetting("index_path", ""))
+    --- Anonymous, because `return function name()` is not a thing Lua has: the
+    --- named form is a statement and not an expression, and this is an expression.
+    return function()
+        settings:saveSetting("index_path", was)
+        settings:flush()
+        logger.info("PROBE: index path put back to", was ~= "" and was or "(unset)")
+    end
+end
+
 local Probe = WidgetContainer:extend{
     name = "turbosearch_probe",
 }
@@ -100,10 +124,7 @@ function Probe:probeIndex()
     -- different object is a different world: the reader goes on indexing wherever
     -- it was already pointed, says so cheerfully, and the index this probe meant
     -- to build is never created.
-    local settings = instance:loadSettings()
-    settings:saveSetting("index_path", INDEX)
-    settings:flush()
-    logger.info("PROBE: indexing into", settings:readSetting("index_path", ""))
+    local restore = aim_at(instance)
 
     -- Where the reader is, which is the whole question the Index button answers.
     -- Inside a book it is the book's folder; on the main menu it is the folder
@@ -143,11 +164,13 @@ function Probe:probeIndex()
         local engine = instance:engine()
         if not engine then
             logger.info("PROBE: engine not loaded")
+            restore()
             return
         end
-        local h, open_err = engine.open_index(settings:readSetting("index_path", ""))
+        local h, open_err = engine.open_index(INDEX)
         if not h then
             logger.info("PROBE: open_index failed", tostring(open_err))
+            restore()
             return
         end
         local rows, why = engine.search(h, QUERY, { scope = here })
@@ -161,6 +184,7 @@ function Probe:probeIndex()
             { scope = here == "" and "/nowhere" or here .. "-not-a-folder" })
         logger.info("PROBE: search pointed outside its own folder", #outside)
         engine.close(h)
+        restore()
         logger.info("PROBE: ==== end ====")
     end)
 end
@@ -255,10 +279,8 @@ function Probe:probe()
     -- it was already pointed, says so cheerfully, and the index this probe meant
     -- to build is never created.
     local settings = instance:loadSettings()
-    settings:saveSetting("index_path", INDEX)
-    settings:flush()
+    local restore = aim_at(instance)
     self.settings_for_report = settings
-    logger.info("PROBE: indexing into", settings:readSetting("index_path", ""))
 
     package.path = PLUGIN_DIR .. "?.lua;" .. package.path
     local ts = require("turbosearch")
@@ -266,6 +288,7 @@ function Probe:probe()
     local ok, err = pcall(ts.load_lib, PLUGIN_DIR .. "libturbosearch.so")
     logger.info("PROBE: load_lib", ok, tostring(err))
     if not ok then
+        restore()
         return
     end
     logger.info("PROBE: engine", ts.version() or "?", "loaded:", ts.is_loaded())
@@ -274,6 +297,7 @@ function Probe:probe()
     handle, err = ts.open_index(INDEX)
     logger.info("PROBE: open_index", handle ~= nil, tostring(err))
     if not handle then
+        restore()
         return
     end
     logger.info("PROBE: content mode", ts.content_mode(handle))
@@ -388,6 +412,7 @@ function Probe:probe()
         logger.info("PROBE: FileManager.openFile returned for", path)
     end)
     logger.info("PROBE: openBook", opened, tostring(build_err))
+    restore()
 end
 
 return Probe
