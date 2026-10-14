@@ -14,16 +14,12 @@
 //! section of that book becomes one `ENTRYMAP` row, which is what lets a hit
 //! resolve back to the exact file it came from.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use turbosearch::format::{epub, mobi, plain, sniff};
-use turbosearch::index::{EntryMap, dict, entrymap, query, writer};
-use turbosearch::storage::book::{Format, scan_scope};
-use turbosearch::storage::metadata::{BookMetaRecord, Provenance};
-use turbosearch::storage::{Engine, RunError, book::FileEntry, config::Config};
-use turbosearch::tokenize::for_each_token_spanned;
+use turbosearch::format::sniff;
+use turbosearch::index::{EntryMap, dict, query, writer};
+use turbosearch::storage::{Engine, build};
 
 /// Reads an environment variable, falling back to the settings file beside the
 /// index.
@@ -168,274 +164,88 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let started = Instant::now();
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    let mut indexed = 0usize;
-    let mut skipped = 0usize;
-    let mut failed = 0usize;
-    let mut text_bytes = 0u64;
-    let mut tokens = 0u64;
-    // Sub-phase timings inside "decode + index + write". Without them the only
-    // visible breakdown is decode-or-write, which is not enough to know which of
-    // the two to attack — and the answer turned out to be neither.
-    let mut t_decode = std::time::Duration::ZERO;
-    let mut t_loop = std::time::Duration::ZERO;
-    let mut t_entrymap = std::time::Duration::ZERO;
-    let t_flush;
-    let t_enc;
-    let t_wr;
-    let mut sections_total = 0usize;
-    // `(book_id, metadata)` for every book, metadata-only formats included.
-    let mut records: Vec<(u16, turbosearch::storage::metadata::BookMetaRecord)> = Vec::new();
 
-    let mut dict = dict::Dict::new();
-    {
-        let mut w = writer::Writer::new(&engine)?;
-        for entry in plan(&engine, &root, max_books) {
-            // Sniff the container: the extension only decided whether the file was
-            // worth opening at all.
-            let format = sniff::detect(&entry.path);
-            if !format.is_text() {
-                skipped += 1;
-                continue;
-            }
-
-            let book_id = w.documents() as u16;
-            let _t = std::time::Instant::now();
-            // `FileList` never opens a book: that is the entire point of the
-            // mode. Indexing 600 books costs a `read_dir` and a metadata read,
-            // not 300 MB of decoded HTML.
-            if !content_mode.has_content() {
-                let record = turbosearch::format::meta::resolve(&entry.path);
-                engine.put_book_batch(
-                    book_id,
-                    &turbosearch::storage::book::Book {
-                        path: entry.path.to_string_lossy().into_owned(),
-                        scope: entry.scope.clone().unwrap_or_default(),
-                        size: entry.size,
-                        mtime_ms: entry.mtime_ms,
-                        inode: entry.inode,
-                        format,
-                        entry_count: 0,
-                        token_count: 0,
-                        indexed_at_ms: now_ms(),
-                        flags: 0,
-                    },
-                )?;
-                engine.put_metadata_batch(book_id, &record)?;
-                records.push((book_id, record));
-                w.end_document()?;
-                indexed += 1;
-                *counts
-                    .entry(format!("{format:?} metadata-only"))
-                    .or_insert(0) += 1;
-                continue;
-            }
-            let decoded = match load_sections(&entry.path, format) {
-                Ok(d) => d,
-                Err(e) => {
-                    failed += 1;
-                    if failed <= 5 {
-                        eprintln!("  decode {}: {e}", entry.path.display());
-                    }
-                    continue;
-                }
-            };
-            t_decode += _t.elapsed();
-            sections_total += decoded.sections.len();
-
-            // One position counter for the whole book. Sections share it and are
-            // told apart by `entry_idx`, which is what the chunk codec requires:
-            // `pos_gap` is a delta, so restarting per section would make positions
-            // non-monotonic within a document and corrupt the column.
-            let _t_loop = std::time::Instant::now();
-            let mut position = 0u32;
-            let mut section_tokens = 0u64;
-            // Every section's entry map, held until the book is done. Writing
-            // them one at a time is one transaction per section, and a
-            // 12 000-section library pays for twelve thousand of them; one per
-            // book is both cheaper and leaves the file far less fragmented,
-            // which is what the final compaction has to clean up.
-            let mut maps: Vec<(u16, EntryMap)> = Vec::with_capacity(decoded.sections.len());
-            for (entry_idx, text) in decoded.sections.iter().enumerate() {
-                // Sections are decoded bytes; tokenizing needs text.
-                let text = String::from_utf8_lossy(text).into_owned();
-                let mut b = entrymap::Builder::new(entry_name(&entry.path, entry_idx));
-                // Position and byte offset are offered together, which is what makes
-                // the checkpoint sparse rather than one per token.
-                if content_mode.has_positions() {
-                    // The count comes from the same pass rather than a second
-                    // `tokenize::tokenize` call: that re-tokenized every section
-                    // and allocated a `Vec` of owned terms, which on the measured
-                    // library is ~1,2 GB of churn to print one number.
-                    position = for_each_token_spanned(&text, position, |term, p, start, _end| {
-                        b.offer(p, start as u32);
-                        let _ = w.add(term, book_id as u32, p, entry_idx as u16);
-                        section_tokens += 1;
-                    });
-                } else {
-                    // `TermsOnly`: one posting per term and book, which is what
-                    // makes the mode small — the same term repeated two hundred
-                    // times in one book still contributes exactly one posting.
-                    //
-                    // The position counter keeps running across sections, exactly
-                    // as in `Full`: `pos_gap` is a delta within a document, and
-                    // resetting it per section makes positions repeat, which
-                    // underflows the column and makes the term's whole posting
-                    // list unreadable. Measured as a content search that returned
-                    // zero hits in this mode and the right answer in `Full`.
-                    let mut seen: std::collections::BTreeMap<Vec<u8>, (u32, u16)> =
-                        std::collections::BTreeMap::new();
-                    let mut next = position;
-                    for_each_token_spanned(&text, position, |term, p, _start, _end| {
-                        seen.insert(term.to_vec(), (p, entry_idx as u16));
-                        next = next.max(p + 1);
-                        section_tokens += 1;
-                    });
-                    for (term, (p, entry)) in seen {
-                        let _ = w.add(&term, book_id as u32, p, entry);
-                    }
-                    position = next;
-                }
-                maps.push((entry_idx as u16, b.finish()));
-
-                text_bytes += text.len() as u64;
-            }
-            tokens += section_tokens;
-            t_loop += _t_loop.elapsed();
-            let _t_em = std::time::Instant::now();
-            for (entry_idx, map) in &maps {
-                writer::put_entry_map(&engine, book_id, *entry_idx, map)?;
-            }
-            t_entrymap += _t_em.elapsed();
-
-            w.end_document()?;
-            indexed += 1;
-            *counts.entry(format!("{format:?}")).or_insert(0) += 1;
-
-            // Metadata for every book, content or not: a PDF the decoder cannot
-            // read still has a title worth searching for, and it must land under
-            // the same book id the postings of readable books use.
-            //
-            // Sidecar first, exactly as `meta::resolve` orders it, but the
-            // embedded half comes from the book just decoded instead of opening
-            // the file a second time.
-            let record = turbosearch::format::meta::from_sidecar(&entry.path)
-                .or_else(|| decoded.embedded.clone())
-                .unwrap_or_else(|| turbosearch::format::meta::from_filename(&entry.path));
-            records.push((book_id, record));
-
-            // Registering the book matters for more than listing: `METAIDX` is
-            // rebuilt from `METADATA` rows *that have a live `BOOKS` row*, so a
-            // book omitted here would silently vanish from every metadata search.
-            engine.put_book_batch(
-                book_id,
-                &turbosearch::storage::book::Book {
-                    path: entry.path.to_string_lossy().into_owned(),
-                    scope: entry.scope.clone().unwrap_or_default(),
-                    size: entry.size,
-                    mtime_ms: entry.mtime_ms,
-                    inode: entry.inode,
-                    format,
-                    entry_count: decoded.sections.len() as u16,
-                    token_count: tokens as u32,
-                    indexed_at_ms: now_ms(),
-                    flags: 0,
-                },
-            )?;
-        }
-        w.close(&mut dict)?;
-        t_flush = w.time_flush();
-        t_enc = w.time_encode();
-        t_wr = w.time_write();
+    // The scan and the build are two calls rather than one. A scan is one
+    // `stat` per file and a build is minutes, so a caller that wants to say what
+    // is about to happen — or warn that it will take a while — has somewhere to
+    // do it.
+    let plan = build::plan_scope(&engine, &root, max_books);
+    if let Some(why) = &plan.config_error {
+        eprintln!("{why}");
     }
-    let t_books = started.elapsed();
-
-    let mut meta_rows = 0usize;
-    for (book_id, record) in &records {
-        engine.put_metadata_batch(*book_id, record)?;
-        meta_rows += 1;
+    if let Some(why) = &plan.scan_error {
+        eprintln!("{why}");
     }
-    // Everything above with `*_batch` is parked in memory until one durable
-    // commit. `rebuild_index` below reads those rows, and the non-durable commit
-    // is visible to it inside this process, but the file on disk still needs the
-    // flush before compaction rewrites it.
-    engine.flush()?;
-    let index = turbosearch::storage::metadata::rebuild_index(&engine)?;
-    engine.put_meta_index(&index)?;
-    println!(
-        "metadata rows: {meta_rows}, index {} bytes",
-        index.blob_len()
+    eprintln!(
+        "scan: {} new, {} updated, {} unchanged, {} missing",
+        plan.new,
+        plan.updated,
+        plan.unchanged,
+        plan.missing.len()
     );
-    // Compact once the writer is gone, so the file does not carry every page the
-    // session churned through. A fresh index that skips this measured 69% free
-    // space, which is three times the data it holds.
-    let t_meta = started.elapsed();
-    // Compaction is the single biggest write in the build: it rewrites the
-    // whole database to reclaim free pages. With rows written in key order the
-    // overhead is already down to 37,9%, so this trades a one-time write
-    // against a permanently smaller file, and the choice belongs to the caller
-    // rather than to the code — which is why it can be turned off.
-    //
-    // Only when the session actually wrote something. `VACUUM` rewrites the
-    // whole database, so running it on a rescan that found nothing to do costs a
-    // full 162 MB write to reclaim nothing — and a rescan with no changes is the
-    // common case on a device. Measured on a 25-book directory: a no-change
-    // rescan went from rewriting the file to writing nothing at all, and from
-    // 28 s to 160 ms.
-    let reclaimed = if std::env::var("NO_COMPACT").is_ok() {
+
+    // Compaction is the single biggest write in the build: it rewrites the whole
+    // database to reclaim free pages. With rows written in key order the
+    // overhead is already down to 37,9%, so this trades a one-time write against
+    // a permanently smaller file, and the choice belongs to the caller rather
+    // than to the code — which is why it can be turned off.
+    let compact = if std::env::var("NO_COMPACT").is_ok() {
         eprintln!("compaction skipped (NO_COMPACT): keeping every page the build churned");
         false
-    } else if indexed == 0 && meta_rows == 0 {
-        eprintln!("compaction skipped: nothing was indexed");
-        false
     } else {
-        engine.compact()?
+        true
     };
-    let size_after_compact = engine.file_size();
-    let t_compact = started.elapsed();
 
+    let mut session = build::Session::new(&engine, plan, content_mode)?;
+    // One step for the whole run: this caller has no screen to keep drawing, so
+    // there is nothing to hand control back to between batches.
+    session.step(&engine, usize::MAX)?;
+    let stats = session.finish(&engine, compact)?;
+    if !stats.reclaimed {
+        eprintln!("compaction skipped: nothing was indexed");
+    }
+    for failure in &stats.failures {
+        eprintln!("  {failure}");
+    }
     println!(
-        "indexed {indexed} books ({sections_total} sections), skipped {skipped}, failed {failed}"
+        "metadata rows: {}, index {} bytes",
+        stats.meta_rows, stats.meta_index_bytes
     );
-    let formats = counts
+    println!(
+        "indexed {} books ({} sections), removed {}, skipped {}, failed {}",
+        stats.indexed, stats.sections, stats.removed, stats.skipped, stats.failed
+    );
+    let formats = stats
+        .formats
         .iter()
         .map(|(f, n)| format!("{f}={n}"))
         .collect::<Vec<_>>()
         .join(" ");
     println!("formats: {formats}");
-    println!("text {text_bytes} bytes, {tokens} tokens");
+    println!("text {} bytes, {} tokens", stats.text_bytes, stats.tokens);
     println!("phases:");
-    println!("  decode                : {:>8.1?}", t_decode);
-    println!("  chunk encode          : {:>8.1?}", t_enc);
-    println!("  postings write        : {:>8.1?}", t_wr);
-    println!(
-        "  tokenize + index      : {:>8.1?}  (flush: {:>8.1?})",
-        t_loop, t_flush
-    );
-    println!("  entry maps            : {:>8.1?}", t_entrymap);
-    println!(
-        "  postings flush + dict : {:>8.1?}",
-        t_meta.saturating_sub(t_books)
-    );
-    println!(
-        "  metadata + metaidx    : {:>8.1?}",
-        t_meta.saturating_sub(t_books)
-    );
-    println!(
-        "  compaction            : {:>8.1?}",
-        t_compact.saturating_sub(t_meta)
-    );
-    println!("  total                  : {:>8.1?}", started.elapsed());
-    let size = size_after_compact;
+    println!("  decode                : {:>8.1?}", stats.decode);
+    println!("  tokenize + index      : {:>8.1?}", stats.tokenize);
+    println!("  entry maps            : {:>8.1?}", stats.entrymap);
+    println!("  chunk encode          : {:>8.1?}", stats.chunk_encode);
+    println!("  postings write        : {:>8.1?}", stats.postings_write);
+    println!("  postings flush + dict : {:>8.1?}", stats.writer_flush);
+    println!("  metadata + metaidx    : {:>8.1?}", stats.finish);
+    println!("  total                 : {:>8.1?}", started.elapsed());
+    let size = engine.file_size();
     println!(
         "compaction reclaimed free pages: {}",
-        if reclaimed { "yes" } else { "none to reclaim" }
+        if stats.reclaimed {
+            "yes"
+        } else {
+            "none to reclaim"
+        }
     );
-    println!("db {db:?} = {} bytes ({:.1} MB)", size, size as f64 / 1e6);
-    if text_bytes > 0 {
+    println!("db {db:?} = {size} bytes ({:.1} MB)", size as f64 / 1e6);
+    if stats.text_bytes > 0 {
         println!(
             "index size / text size = {:.1}%",
-            size as f64 * 100.0 / text_bytes as f64
+            size as f64 * 100.0 / stats.text_bytes as f64
         );
     }
 
@@ -564,153 +374,9 @@ fn load_section_text(map: &EntryMap) -> Option<String> {
     let (path, idx) = map.name.rsplit_once('#')?;
     let idx: usize = idx.parse().ok()?;
     let format = sniff::detect(Path::new(path));
-    let decoded = load_sections(Path::new(path), format).ok()?;
+    let decoded = build::load_sections(Path::new(path), format).ok()?;
     let raw = decoded.sections.get(idx)?;
     Some(String::from_utf8_lossy(raw).into_owned())
-}
-
-/// Name recorded in `ENTRYMAP`, carrying the source path so snippets can be
-/// traced back to a file.
-/// Wall-clock milliseconds, for `Book.indexed_at_ms`.
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
-fn entry_name(path: &Path, idx: usize) -> String {
-    format!("{}#{idx}", path.display())
-}
-
-/// Walks the library through the real scan path, so the extension filters and
-/// directory exclusions in `Config` are exercised rather than assumed.
-/// The files this pass has to index, diffed against what is already indexed.
-///
-/// The engine here is the **real** one, not a scratch copy. `scan_scope` diffs a
-/// candidate against `BOOKS` on `(size, mtime, inode)` and reports it `unchanged`
-/// when all three match, which is what makes a rescan cost a `stat` per file
-/// rather than a full re-index. Diffing against a throwaway database made every
-/// file look new on every run, so a rescan re-tokenized the whole library and
-/// the file grew each time — measured at 15,3 s and a doubled database for a
-/// rescan with no changes.
-///
-/// The settings come from the **database**, not from `Config::default()`. A
-/// settings screen cannot be worth opening if what it writes is ignored on the
-/// next run, and the config row is the one place both the plugin and this binary
-/// can see. `Default` is still the fallback for an index nobody has configured.
-fn plan(engine: &Engine, root: &Path, max: Option<usize>) -> Vec<FileEntry> {
-    let cfg = match engine.config() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("config: {e}, using defaults");
-            Config::default()
-        }
-    };
-    let mut out = match scan_scope(engine, &cfg.filter(), root) {
-        Ok(p) => {
-            eprintln!(
-                "scan: {} new, {} updated, {} unchanged, {} missing",
-                p.new.len(),
-                p.updated.len(),
-                p.unchanged.len(),
-                p.missing.len()
-            );
-            // `updated` is indexed alongside `new`: a file whose fingerprint
-            // changed is a file whose content may have changed, and skipping it
-            // because only `new` was consulted is how a book silently stops
-            // matching after it is edited.
-            let mut out = p.new;
-            out.extend(p.updated);
-            out
-        }
-        Err(e) => {
-            eprintln!("scan {root:?}: {e}");
-            Vec::new()
-        }
-    };
-    out.sort_by(|a, b| a.path.cmp(&b.path));
-    if let Some(n) = max {
-        out.truncate(n);
-    }
-    out
-}
-
-/// Loads a book's sections in reading order, as decoded text.
-/// The decoded book: its sections, and the metadata that was already open.
-///
-/// The metadata comes back with the sections rather than being resolved again
-/// afterwards, because resolving it afterwards re-opens the file. That second
-/// open cost 12,5 s per 100 books on the measured library, which is a whole
-/// extra decode pass spent reading an OPF that was already in memory.
-struct Decoded {
-    sections: Vec<Vec<u8>>,
-    /// Embedded metadata, when the container carried any.
-    embedded: Option<BookMetaRecord>,
-}
-
-fn load_sections(path: &Path, format: Format) -> Result<Decoded, RunError> {
-    match format {
-        Format::Epub | Format::Kepub => {
-            let book = epub::open(path).map_err(|e| bad(&e.to_string()))?;
-            // The OPF is parsed by `open` anyway; turning it into the record here
-            // is what `format::meta::from_embedded` does after re-opening.
-            let embedded = (!book.metadata.title.is_empty()).then(|| {
-                let mut record =
-                    BookMetaRecord::new(book.metadata.title.clone(), book.metadata.authors.clone());
-                record.language = book.metadata.language.clone();
-                record.series = book.metadata.series.clone();
-                record.series_index = book.metadata.series_index;
-                record.set_description(book.metadata.description.clone());
-                record.identifiers = book.metadata.identifiers.clone();
-                record.publisher = book.metadata.publisher.clone();
-                record.provenance = Provenance::Embedded;
-                record
-            });
-            Ok(Decoded {
-                sections: book.sections.into_iter().map(|s| s.text).collect(),
-                embedded,
-            })
-        }
-        Format::Txt | Format::Markdown => {
-            let bytes = std::fs::read(path).map_err(|e| bad(&e.to_string()))?;
-            Ok(Decoded {
-                sections: plain::single_section(&bytes)
-                    .map_err(|e| bad(&e.to_string()))?
-                    .into_iter()
-                    .map(|s| s.text)
-                    .collect(),
-                embedded: None,
-            })
-        }
-        Format::Mobi | Format::Azw | Format::Azw3 => {
-            let bytes = std::fs::read(path).map_err(|e| bad(&e.to_string()))?;
-            let book = mobi::parse(&bytes).map_err(|e| bad(&e.to_string()))?;
-            let embedded = (!book.metadata.title.is_empty()).then(|| {
-                let mut record =
-                    BookMetaRecord::new(book.metadata.title.clone(), book.metadata.authors.clone());
-                record.language = book.metadata.language.clone();
-                record.publisher = book.metadata.publisher.clone();
-                record.identifiers = if book.metadata.isbn.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![format!("isbn:{}", book.metadata.isbn)]
-                };
-                record.set_description(book.metadata.description.clone());
-                record.provenance = Provenance::Embedded;
-                record
-            });
-            Ok(Decoded {
-                sections: vec![book.text],
-                embedded,
-            })
-        }
-        _ => Err(bad("unsupported text format")),
-    }
-}
-
-fn bad(what: &str) -> RunError {
-    RunError::Message(what.to_string())
 }
 
 #[cfg(test)]

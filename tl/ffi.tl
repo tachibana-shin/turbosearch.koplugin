@@ -17,9 +17,17 @@ local record CLibrary
    ts_open: function(any): any
    ts_close: function(any)
    ts_content_mode: function(any): integer
-   ts_search: function(any, string, any): any
-   ts_search_meta: function(any, string, any): any
-   ts_search_regex: function(any, string, any): any
+   -- The third argument is the directory a search is limited to; an empty one
+   -- is everything that has been indexed.
+   ts_search: function(any, string, string, any): any
+   ts_search_meta: function(any, string, string, any): any
+   ts_search_regex: function(any, string, string, any): any
+   -- Building, handed back one batch at a time so the reader can still draw.
+   -- `ts_index_begin` answers with how many files still need reading, which is
+   -- one `stat` each and no writes at all.
+   ts_index_begin: function(any, string): integer
+   ts_index_step: function(any, integer): integer
+   ts_index_end: function(any): any
    ts_book_title: function(any, integer): any
    ts_book_path: function(any, integer): any
    ts_alloc_buffer: function(integer): any

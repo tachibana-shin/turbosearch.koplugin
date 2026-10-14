@@ -5,6 +5,7 @@
 //! definitions and the transaction API — is gone with the backend.
 
 pub mod book;
+pub mod build;
 pub mod config;
 pub mod meta;
 pub mod metadata;
@@ -14,6 +15,7 @@ pub use book::{
     Book, Coverage, FileFilter, Format, ScanMode, ScanPlan, ScopeFilter, path_in_scope, scan_full,
     scan_scope, scan_with_mode,
 };
+pub use build::{BuildStats, Plan, Session, load_sections, plan_full, plan_scope};
 pub use config::{Config, IndexDepth, PrefixMode};
 pub use meta::{Meta, Status};
 pub use metadata::{

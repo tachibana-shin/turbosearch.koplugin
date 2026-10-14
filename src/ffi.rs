@@ -51,6 +51,13 @@ pub const TS_ERR_INTERNAL: c_int = -4;
 pub struct TsIndex {
     engine: &'static crate::storage::Engine,
     dict: dict::Dict,
+    /// The indexing session `ts_index_begin` opened, if one is open.
+    ///
+    /// On the handle rather than in a thread-local because it outlives the call
+    /// that made it: a session that only ever existed for the duration of one
+    /// function could not be stepped, and stepping is what keeps the reader's
+    /// screen drawing while a library is being read.
+    session: Option<crate::storage::build::Session>,
 }
 
 thread_local! {
@@ -167,7 +174,11 @@ pub unsafe extern "C" fn ts_open(db_path: *const c_char) -> *mut TsIndex {
                         }
                     };
                     clear_error();
-                    Box::into_raw(Box::new(TsIndex { engine, dict: d }))
+                    Box::into_raw(Box::new(TsIndex {
+                        engine,
+                        dict: d,
+                        session: None,
+                    }))
                 }
                 Err(e) => {
                     set_error(&format!("ts_open: {path}: {e}"));
@@ -197,7 +208,15 @@ pub unsafe extern "C" fn ts_close(handle: *mut TsIndex) {
             return;
         }
         let _ = panic::catch_unwind(AssertUnwindSafe(|| {
-            let boxed = Box::from_raw(handle);
+            let mut boxed = Box::from_raw(handle);
+            // An open session holds metadata it has not written yet, and a book
+            // with postings and no `BOOKS` row is one nobody can find. Dropping
+            // it silently would lose exactly those books, so the session is
+            // finished here as well; its report has nowhere to go, its writes
+            // still land.
+            if let Some(session) = boxed.session.take() {
+                let _ = session.finish(boxed.engine, true);
+            }
             // The engine was leaked in ts_open so the handle could hold a reference
             // to it; this is where that ends.
             drop(boxed);
@@ -240,6 +259,7 @@ pub unsafe extern "C" fn ts_content_mode(handle: *mut TsIndex) -> c_int {
 pub unsafe extern "C" fn ts_search(
     handle: *mut TsIndex,
     query: *const c_char,
+    scope: *const c_char,
     out_count: *mut c_int,
 ) -> *mut c_char {
     unsafe {
@@ -250,7 +270,9 @@ pub unsafe extern "C" fn ts_search(
             return err_ret("ts_search: null or empty query", out_count);
         };
 
-        match panic::catch_unwind(AssertUnwindSafe(|| search_impl(handle, q))) {
+        match panic::catch_unwind(AssertUnwindSafe(|| {
+            search_impl(handle, q, to_str(scope).unwrap_or(""))
+        })) {
             Ok(Ok((buffer, count))) => {
                 clear_error();
                 if !out_count.is_null() {
@@ -278,6 +300,7 @@ pub unsafe extern "C" fn ts_search(
 pub unsafe extern "C" fn ts_search_regex(
     handle: *mut TsIndex,
     query: *const c_char,
+    scope: *const c_char,
     out_count: *mut c_int,
 ) -> *mut c_char {
     unsafe {
@@ -288,7 +311,9 @@ pub unsafe extern "C" fn ts_search_regex(
             return err_ret("ts_search_regex: null or empty query", out_count);
         };
 
-        match panic::catch_unwind(AssertUnwindSafe(|| regex_impl(handle, q))) {
+        match panic::catch_unwind(AssertUnwindSafe(|| {
+            regex_impl(handle, q, to_str(scope).unwrap_or(""))
+        })) {
             Ok(Ok((buffer, count))) => {
                 clear_error();
                 if !out_count.is_null() {
@@ -302,10 +327,15 @@ pub unsafe extern "C" fn ts_search_regex(
     }
 }
 
-fn regex_impl(handle: &TsIndex, query: &str) -> crate::storage::RunResult<(*mut c_char, c_int)> {
-    let result = query::search_regex(handle.engine, &handle.dict, query)?;
-    let buffer = lines_buffer(result.iter().map(|h| (h.doc_id, h.score)));
-    Ok((buffer, result.len() as c_int))
+fn regex_impl(
+    handle: &TsIndex,
+    query: &str,
+    scope: &str,
+) -> crate::storage::RunResult<(*mut c_char, c_int)> {
+    let hits = query::search_regex(handle.engine, &handle.dict, query)?;
+    let hits = query::live_hits(handle.engine, hits, scope)?;
+    let buffer = lines_buffer(hits.iter().map(|h| (h.doc_id, h.score)));
+    Ok((buffer, hits.len() as c_int))
 }
 
 /// The size of the index on disk, in bytes, or a negative error code.
@@ -442,10 +472,15 @@ pub unsafe extern "C" fn ts_set_config_text(handle: *mut TsIndex, text: *const c
     }
 }
 
-fn search_impl(handle: &TsIndex, query: &str) -> crate::storage::RunResult<(*mut c_char, c_int)> {
-    let result = query::search_phrase(handle.engine, &handle.dict, query)?;
-    let buffer = lines_buffer(result.iter().map(|h| (h.doc_id, h.score)));
-    Ok((buffer, result.len() as c_int))
+fn search_impl(
+    handle: &TsIndex,
+    query: &str,
+    scope: &str,
+) -> crate::storage::RunResult<(*mut c_char, c_int)> {
+    let hits = query::search_phrase(handle.engine, &handle.dict, query)?;
+    let hits = query::live_hits(handle.engine, hits, scope)?;
+    let buffer = lines_buffer(hits.iter().map(|h| (h.doc_id, h.score)));
+    Ok((buffer, hits.len() as c_int))
 }
 
 /// Writes a results buffer and reports the count.
@@ -469,6 +504,7 @@ unsafe fn err_ret(msg: &str, out_count: *mut c_int) -> *mut c_char {
 pub unsafe extern "C" fn ts_search_meta(
     handle: *mut TsIndex,
     query: *const c_char,
+    scope: *const c_char,
     out_count: *mut c_int,
 ) -> *mut c_char {
     unsafe {
@@ -479,7 +515,15 @@ pub unsafe extern "C" fn ts_search_meta(
             return err_ret("ts_search_meta: null or empty query", out_count);
         };
 
-        match panic::catch_unwind(AssertUnwindSafe(|| metadata::search(handle.engine, q))) {
+        match panic::catch_unwind(AssertUnwindSafe(|| {
+            let rows = metadata::search(handle.engine, q)?;
+            let ids = crate::storage::book::scope_ids(handle.engine, to_str(scope).unwrap_or(""))?;
+            crate::storage::RunResult::Ok(
+                rows.into_iter()
+                    .filter(|(id, _)| ids.contains(id))
+                    .collect::<Vec<_>>(),
+            )
+        })) {
             Ok(Ok(rows)) => {
                 clear_error();
                 let mut body = String::new();
@@ -498,6 +542,169 @@ pub unsafe extern "C" fn ts_search_meta(
             Ok(Err(e)) => err_ret(&format!("ts_search_meta: {e}"), out_count),
             Err(_) => err_ret("ts_search_meta: panicked", out_count),
         }
+    }
+}
+
+/// Starts indexing what `dir` still needs, and reports how many files are left.
+///
+/// `dir` empty means every configured root: the whole library, which is minutes
+/// rather than seconds and worth warning about before a single book is read. The
+/// scan that answers the count costs one `stat` per file and writes nothing, so
+/// a caller can ask what this is going to take and then decide.
+///
+/// A previous session is replaced rather than resumed: the reader asks again
+/// each time, and a session that is finished rather than abandoned still writes
+/// the metadata it has been holding.
+///
+/// # Safety
+/// `handle` must come from [`ts_open`]; `dir` must be a null-terminated UTF-8
+/// path or null, and null means the whole library.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_index_begin(handle: *mut TsIndex, dir: *const c_char) -> c_int {
+    unsafe {
+        let Some(engine) = as_ref(handle).map(|h| h.engine) else {
+            return TS_ERR_ARGUMENT;
+        };
+        let dir = to_str(dir).unwrap_or("").to_string();
+
+        let built = panic::catch_unwind(AssertUnwindSafe(|| {
+            let plan = if dir.is_empty() {
+                crate::storage::build::plan_full(engine, None)
+            } else {
+                crate::storage::build::plan_scope(engine, Path::new(&dir), None)
+            };
+            if let Some(why) = &plan.scan_error {
+                // An unreadable root is not fatal — the card may be out — but it
+                // does mean this pass indexes nothing, and a caller told
+                // otherwise would search an index that never grew.
+                set_error(&format!("ts_index_begin: {why}"));
+            }
+            let mode = engine.config()?.content_mode;
+            crate::storage::build::Session::new(engine, plan, mode)
+        }));
+        match built {
+            Ok(Ok(session)) => {
+                let pending = session.pending() as c_int;
+                if session.pending() == 0 && session.gone() == 0 {
+                    // Nothing to read and nothing to drop. Keeping the session
+                    // anyway would make closing the handle finish it, and
+                    // finishing rebuilds the metadata index — a write on every
+                    // search, for nothing, on a device that writes.
+                    clear_error();
+                    return 0;
+                }
+                if let Some(h) = as_mut(handle) {
+                    h.session = Some(session);
+                }
+                clear_error();
+                pending
+            }
+            Ok(Err(e)) => {
+                set_error(&format!("ts_index_begin: {e}"));
+                TS_ERR_QUERY
+            }
+            Err(_) => {
+                set_error("ts_index_begin: panicked");
+                TS_ERR_INTERNAL
+            }
+        }
+    }
+}
+
+/// Reads and indexes at most `budget` of the files the session has left, and
+/// reports what is still to do.
+///
+/// One call per batch rather than one per session, because a screen cannot be
+/// redrawn from inside a call that never returns: the reader shows how much is
+/// left between batches, and the engine gets to hand control back. Zero or a
+/// negative `budget` takes whatever is left.
+///
+/// # Safety
+/// `handle` must come from [`ts_open`] and have a session from [`ts_index_begin`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_index_step(handle: *mut TsIndex, budget: c_int) -> c_int {
+    unsafe {
+        let Some(engine) = as_ref(handle).map(|h| h.engine) else {
+            return TS_ERR_ARGUMENT;
+        };
+        let Some(session) = as_mut(handle).and_then(|h| h.session.as_mut()) else {
+            set_error("ts_index_step: no session; call ts_index_begin first");
+            return TS_ERR_ARGUMENT;
+        };
+        let budget = if budget <= 0 {
+            usize::MAX
+        } else {
+            budget as usize
+        };
+
+        match panic::catch_unwind(AssertUnwindSafe(|| session.step(engine, budget))) {
+            Ok(Ok(left)) => {
+                clear_error();
+                left as c_int
+            }
+            Ok(Err(e)) => {
+                set_error(&format!("ts_index_step: {e}"));
+                TS_ERR_QUERY
+            }
+            Err(_) => {
+                set_error("ts_index_step: panicked");
+                TS_ERR_INTERNAL
+            }
+        }
+    }
+}
+
+/// Ends the session: the metadata it held is written, the metadata index is
+/// rebuilt, the file is compacted when anything was written, and the handle's
+/// dictionary is reloaded so the next search sees what was just indexed.
+///
+/// Writes the key/value lines `key=value`, one per line, which is what a caller
+/// turns into a sentence. Empty when there was no session, which is a valid
+/// answer rather than an error: nothing was asked of it.
+///
+/// # Safety
+/// `handle` must come from [`ts_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_index_end(handle: *mut TsIndex) -> *mut c_char {
+    unsafe {
+        let Some(engine) = as_ref(handle).map(|h| h.engine) else {
+            return err_ret("ts_index_end: null handle", std::ptr::null_mut());
+        };
+        let Some(session) = as_mut(handle).and_then(|h| h.session.take()) else {
+            clear_error();
+            return to_c_string("");
+        };
+
+        let done = panic::catch_unwind(AssertUnwindSafe(|| session.finish(engine, true)));
+        let stats = match done {
+            Ok(Ok(stats)) => stats,
+            Ok(Err(e)) => return err_ret(&format!("ts_index_end: {e}"), std::ptr::null_mut()),
+            Err(_) => return err_ret("ts_index_end: panicked", std::ptr::null_mut()),
+        };
+        // The session stored a dictionary of its own; the handle is still
+        // searching with the one it loaded at open, and a query run before this
+        // line would be answered from a dictionary that has never heard of the
+        // terms just written.
+        match dict::load(engine) {
+            Ok(d) => {
+                if let Some(h) = as_mut(handle) {
+                    h.dict = d;
+                }
+            }
+            Err(e) => return err_ret(&format!("ts_index_end: {e}"), std::ptr::null_mut()),
+        }
+        clear_error();
+        to_c_string(&format!(
+            "indexed={}\nremoved={}\nskipped={}\nfailed={}\nsections={}\ntokens={}\nbytes={}\nreclaimed={}\n",
+            stats.indexed,
+            stats.removed,
+            stats.skipped,
+            stats.failed,
+            stats.sections,
+            stats.tokens,
+            stats.text_bytes,
+            stats.reclaimed
+        ))
     }
 }
 
@@ -565,6 +772,21 @@ unsafe fn as_ref<'b>(handle: *mut TsIndex) -> Option<&'b TsIndex> {
             None
         } else {
             Some(&*(handle as *const TsIndex))
+        }
+    }
+}
+
+/// Borrows a handle mutably, for one call.
+///
+/// The lifetime is the caller's, exactly as in [`as_ref`]: the handle is owned
+/// by whoever passed the pointer in, and nothing here outlives the call it was
+/// made for. Nothing may hold both at once.
+unsafe fn as_mut<'b>(handle: *mut TsIndex) -> Option<&'b mut TsIndex> {
+    unsafe {
+        if handle.is_null() {
+            None
+        } else {
+            Some(&mut *handle)
         }
     }
 }
@@ -650,7 +872,7 @@ mod tests {
         let bad = CString::new("").unwrap();
         let mut count = -99i32;
         let handle = std::ptr::null_mut::<TsIndex>();
-        let out = unsafe { ts_search(handle, bad.as_ptr(), &mut count) };
+        let out = unsafe { ts_search(handle, bad.as_ptr(), std::ptr::null(), &mut count) };
         assert!(out.is_null());
         assert_eq!(count, 0, "a failed call must zero the count");
         let err = unsafe { std::ffi::CStr::from_ptr(ts_last_error()) }
@@ -694,9 +916,27 @@ mod tests {
     #[test]
     fn a_null_handle_is_refused_by_every_entry_point() {
         let mut count = 7i32;
-        assert!(unsafe { ts_search(std::ptr::null_mut(), std::ptr::null(), &mut count) }.is_null());
         assert!(
-            unsafe { ts_search_meta(std::ptr::null_mut(), std::ptr::null(), &mut count) }.is_null()
+            unsafe {
+                ts_search(
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    &mut count,
+                )
+            }
+            .is_null()
+        );
+        assert!(
+            unsafe {
+                ts_search_meta(
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    &mut count,
+                )
+            }
+            .is_null()
         );
         assert!(unsafe { ts_book_title(std::ptr::null_mut(), 0) }.is_null());
         assert!(unsafe { ts_book_path(std::ptr::null_mut(), 0) }.is_null());

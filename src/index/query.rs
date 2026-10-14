@@ -259,6 +259,28 @@ fn union(engine: &Engine, terms: &[Vec<u8>]) -> RunResult<Vec<(u32, u32, u32, u1
         .collect())
 }
 
+/// The hits a search is allowed to show.
+///
+/// Postings outlive the book they belong to: a deleted or re-indexed book
+/// leaves chunks behind that are skipped at read time rather than rewritten, so
+/// a search that does not ask `BOOKS` which ids are live answers for books that
+/// are no longer there — and the reader is handed a row that opens nothing.
+///
+/// `scope` narrows the same list by directory, which is why the two live in one
+/// place: a search started inside a folder must not mix in books from another,
+/// and both rules are the same question asked of the same table.
+pub fn live_hits(
+    engine: &crate::storage::Engine,
+    hits: Vec<Hit>,
+    scope: &str,
+) -> RunResult<Vec<Hit>> {
+    let ids = crate::storage::book::scope_ids(engine, scope)?;
+    Ok(hits
+        .into_iter()
+        .filter(|h| ids.contains(&(h.doc_id as u16)))
+        .collect())
+}
+
 /// Restricts postings to a set of books.
 ///
 /// Scope search and full search are separate code paths on purpose: a scope is

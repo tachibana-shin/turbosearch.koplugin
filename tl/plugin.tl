@@ -16,6 +16,7 @@ local Dispatcher = require("dispatcher")
 local FileManager = require("apps/filemanager/filemanager")
 local InfoMessage = require("ui/widget/infomessage")
 local CheckButton = require("ui/widget/checkbutton")
+local ConfirmBox = require("ui/widget/confirmbox")
 local InputDialog = require("ui/widget/inputdialog")
 local LuaSettings = require("luasettings")
 local Menu = require("ui/widget/menu")
@@ -40,6 +41,14 @@ local record EngineBinding
    book_title: function(any, integer): string
    book_path: function(any, integer): string
    index_info: function(any): any
+   --- Scans a directory and says how many files still need reading. An empty
+   --- directory means every configured root.
+   index_begin: function(any, string): integer, string
+   --- Reads at most `budget` of what the session has left, and says what is
+   --- still to do.
+   index_step: function(any, integer): integer, string
+   --- Ends a session, reporting what it did as `key=value` lines.
+   index_end: function(any): string, string
    --- The whole config, as `key = value` lines.
    config_text: function(any): string, string
    --- Applies settings lines, leaving the rest alone.
@@ -95,6 +104,9 @@ end
 local ICON_SEARCH: string = ""
 local ICON_SETTINGS: string = ""
 local ICON_CLOSE: string = ""
+--- nf-md-refresh.1, checked against the font's own cmap: rebuilding is the
+--- same question as searching, asked earlier.
+local ICON_INDEX: string = ""
 
 --- The engine library, always under one name.
 ---
@@ -189,6 +201,13 @@ end
 --- The application the plugin was loaded into: the FileManager or the Reader.
 local record UiModule
    menu: MenuRegistration
+   --- The open book, when the plugin was opened from inside one. `nil` in the
+   --- browser, which is the whole difference between the two cases below.
+   document: OpenDocument
+end
+
+local record OpenDocument
+   file: string
 end
 
 local record Turbosearch
@@ -210,6 +229,15 @@ local record Turbosearch
    engine_config_text: function(Turbosearch): string, string
    engine_apply_config: function(Turbosearch, string): boolean, string
    settings_index_path: function(Turbosearch): string
+   current_directory: function(Turbosearch): string
+   build_index: function(Turbosearch, EngineBinding, any, string, boolean, function(boolean, string))
+   step_index: function(Turbosearch, EngineBinding, any, integer, function(boolean, string))
+   index_now: function(Turbosearch)
+   close_index_message: function(Turbosearch)
+   index_summary: function(Turbosearch, string): string
+   index_message: any
+   --- The query's results, shown once the index is up to date.
+   results: function(Turbosearch, EngineBinding, any, string, {string: any})
    onDispatcherRegisterActions: function(Turbosearch)
    addToMainMenu: function(Turbosearch, {string: any})
    onTurbosearchSearch: function(Turbosearch)
@@ -394,14 +422,38 @@ function Turbosearch:onTurbosearchSettings(return_to_search: boolean)
    screen:reload()
 end
 
+--- The folder the reader is standing in.
+---
+--- A book being open puts the reader in that book's folder — which is what a
+--- reader who searches from inside a chapter means — and failing that, the
+--- folder being browsed. Empty only when neither exists, and an empty answer is
+--- then not a fallback to "everything" chosen quietly: there is no folder to
+--- speak of, so there is nothing narrower to search.
+function Turbosearch:current_directory(): string
+   local ui: UiModule = self.ui
+   local doc = ui and ui.document
+   if doc and doc.file and doc.file ~= "" then
+      local dir: string = doc.file:match("^(.*)/[^/]+$")
+      if dir and dir ~= "" then
+         return dir
+      end
+   end
+
+   local fm = FileManager.instance
+   if fm and fm.file_chooser and fm.file_chooser.path then
+      return fm.file_chooser.path
+   end
+   return ""
+end
+
 --- Shows the query box, pre-filled with the last query so a follow-up search is
 --- one edit away.
 function Turbosearch:onTurbosearchSearch()
    local settings = self:loadSettings()
 
-   -- The query box, the options, and the two buttons — one screen, in the order a
-   --- reader works through them: what am I looking for, what kind of a search is
-   --- it, go.
+   -- The query box, the options, and the three buttons — one screen, in the order
+   --- a reader works through them: what am I looking for, what kind of a search is
+   --- it, build, go.
    local dialog: QueryDialog
    dialog = InputDialog:new{
       title = _("Search in books"),
@@ -426,6 +478,13 @@ function Turbosearch:onTurbosearchSearch()
                   --- — or who tapped the button by mistake — is back at the keyword
                   --- rather than at the book list.
                   self:onTurbosearchSettings(true)
+               end,
+            },
+            {
+               text = ICON_INDEX .. "  " .. _("Index"),
+               callback = function()
+                  UIManager:close(dialog)
+                  self:index_now()
                end,
             },
             {
@@ -462,7 +521,17 @@ function Turbosearch:onTurbosearchSearch()
    }
    dialog:addWidget(pattern_box)
 
-   Turbosearch.option_boxes = { meta_box, pattern_box } as {OptionBox}
+   -- Off by default: the folder the reader is standing in is what a search from
+   --- inside it means, and a reader who wants every book asked instead can say so
+   --- without it being the answer they did not pick.
+   local global_box = CheckButton:new{
+      text = _("Search the whole library"),
+      checked = settings:readSetting("opt_global", self:current_directory() == "") as boolean,
+      parent = dialog,
+   }
+   dialog:addWidget(global_box)
+
+   Turbosearch.option_boxes = { meta_box, pattern_box, global_box } as {OptionBox}
    UIManager:show(dialog)
    dialog:onShowKeyboard()
 end
@@ -485,8 +554,13 @@ function Turbosearch:readSearchOptions(): {string: any}
    if boxes[2] then
       pattern = boxes[2].checked
    end
+   local whole: boolean = settings:readSetting("opt_global", self:current_directory() == "") as boolean
+   if boxes[3] then
+      whole = boxes[3].checked
+   end
    settings:saveSetting("opt_metadata", metadata)
    settings:saveSetting("opt_pattern", pattern)
+   settings:saveSetting("opt_global", whole)
    settings:flush()
 
    -- Which mode the two boxes amount to. Metadata first, because it is the narrower
@@ -498,7 +572,23 @@ function Turbosearch:readSearchOptions(): {string: any}
    elseif pattern then
       mode = "Pattern"
    end
-   return { mode = mode, metadata = metadata, pattern = pattern }
+
+   -- Where the question is being asked. An empty scope is the whole library, and
+   --- it is the answer in two cases for different reasons: every book was asked
+   --- for, or there is no folder here to ask about — a reader on the main menu is
+   --- not standing in anything, and searching a directory nobody picked would be
+   --- an answer to a question they did not ask.
+   local here: string = self:current_directory()
+   if here == "" then
+      whole = true
+   end
+   return {
+      mode = mode,
+      metadata = metadata,
+      pattern = pattern,
+      whole = whole,
+      scope = whole and "" or here,
+   }
 end
 
 --- Runs a query and shows the results, or the reason there are none.
@@ -535,6 +625,32 @@ function Turbosearch:search(raw_query: string, opts?: {string: any})
 
    -- The engine raises rather than returning an error, so every call is guarded:
    -- pcall keeps a bad query from taking the reader down.
+   -- A search answers from what has been indexed, so what the reader is standing
+   --- in is built first. Indexing is not a setting and not another screen: a
+   --- reader who types a word is asking a question, and the folder they are in is
+   --- the answer they mean.
+   local chosen: {string: any} = opts or {} as {string: any}
+   local scope: string = (chosen.scope or "") as string
+   local whole: boolean = (chosen.whole == true)
+   self:build_index(engine, handle, scope, whole, function(built: boolean, why: string)
+      if not built then
+         engine.close(handle)
+         UIManager:show(InfoMessage:new{
+            text = T(_("Could not index %1.\n\n%2"),
+               scope ~= "" and scope or _("the library"), why),
+         })
+         return
+      end
+      self:results(engine, handle, query, chosen)
+   end)
+end
+
+--- Runs the query and shows what it found, now that the index can answer it.
+---
+--- The handle is closed by whichever branch of it ends the trip, so no handle has
+--- to outlive the search that opened it.
+function Turbosearch:results(engine: EngineBinding, handle: any, query: string,
+                             opts: {string: any})
    local hits, how = self:query(engine, handle, query, opts)
    if not hits then
       engine.close(handle)
@@ -597,9 +713,12 @@ function Turbosearch:query(engine: EngineBinding, handle, query: string,
    --- The binding reports a failed query as a message rather than a raise, so a
    --- bad query is something a reader is shown instead of something that takes the
    --- reader down.
+   --- `chosen` and not `nil`: the scope is in there, and a query that drops it
+   --- answers out of the folder the reader is standing in — the one thing the
+   --- box they just set was there to stop.
    local hits: {Hit}
    local query_err: string
-   hits, query_err = engine.search_as(handle, mode, query, nil)
+   hits, query_err = engine.search_as(handle, mode, query, chosen)
    if query_err ~= "" then
       return hits, query_err
    end
@@ -630,6 +749,172 @@ function Turbosearch:showEmpty(query: string)
       covers_full_width = true,
    }
    UIManager:show(self.result_menu)
+end
+
+--- Brings the index up to date with whatever `scope` covers, then reports.
+---
+--- Reads whatever still needs reading and reports through `on_done(true, report)`
+--- when the index can answer — including when there was nothing to build, which
+--- is the usual case and costs one `stat` per file and no writes — or
+--- `on_done(false, reason)` when it could not. The handle is not closed: whoever
+--- opened it still owns it.
+---
+--- The whole library is minutes the first time and seconds afterwards, so a
+--- reader who asked for it is asked before those minutes are spent. A folder is
+--- not, because that is what a search from inside a folder costs anyway — the
+--- question is only whether it happens once or once per query.
+function Turbosearch:build_index(engine: EngineBinding, handle: any, scope: string,
+                                 whole: boolean, on_done: function(boolean, string))
+   local pending: integer
+   local begin_err: string
+   pending, begin_err = engine.index_begin(handle, scope)
+   if pending < 0 then
+      on_done(false, begin_err)
+      return
+   end
+   if pending == 0 then
+      -- Nothing needs reading. This is the common case for a second search, and
+      --- the whole reason the scan that finds it is worth running every time.
+      on_done(true, "")
+      return
+   end
+
+   if whole then
+      UIManager:show(ConfirmBox:new{
+         text = T(_("%1 books have not been indexed yet.\n\nBuilding them takes minutes the first time, and seconds after that.\n\nIndex them now?"),
+            tostring(pending)),
+         ok_text = ICON_INDEX .. "  " .. _("Index"),
+         cancel_text = _("Search what is indexed"),
+         ok_callback = function()
+            self:step_index(engine, handle, pending, on_done)
+         end,
+         cancel_callback = function()
+            -- Not a failure. The reader was offered the minutes and chose not to
+            --- spend them, and a search over what is there still answers.
+            on_done(true, "")
+         end,
+      })
+      return
+   end
+
+   self:step_index(engine, handle, pending, on_done)
+end
+
+--- Indexes a session a batch at a time, then finishes it.
+---
+--- Stepped rather than done in one call because a call that never returns is a
+--- screen that never draws: each batch hands control back to the event loop, so a
+--- tap still closes the book while a library is being read.
+---
+--- One message, painted once. A Kindle repaints the whole screen, so updating it
+--- per batch would spend longer clearing the display than the reading does, and
+--- would leave a page flickering while somebody tries to read over it.
+function Turbosearch:step_index(engine: EngineBinding, handle: any, total: integer,
+                                on_done: function(boolean, string))
+   local BATCH: integer = 25
+   self.index_message = InfoMessage:new{
+      text = T(_("Indexing %1 books…"), tostring(total)),
+   }
+   UIManager:show(self.index_message)
+
+   local function step()
+      local left: integer
+      local step_err: string
+      left, step_err = engine.index_step(handle, BATCH)
+      if left < 0 then
+         self:close_index_message()
+         on_done(false, step_err)
+         return
+      end
+      if left > 0 then
+         UIManager:tickAfterNext(step)
+         return
+      end
+
+      local report: string
+      local end_err: string
+      report, end_err = engine.index_end(handle)
+      self:close_index_message()
+      if not report then
+         on_done(false, end_err)
+         return
+      end
+      on_done(true, report)
+   end
+   step()
+end
+
+--- Dismisses the indexing message, when one is up.
+function Turbosearch:close_index_message()
+   if self.index_message then
+      UIManager:close(self.index_message)
+      self.index_message = nil
+   end
+end
+
+--- Turns a session's `key=value` report into something worth reading.
+---
+--- A report full of zeroes is the normal outcome of asking twice, and saying so
+--- plainly is better than a sentence that reads like work was done.
+function Turbosearch:index_summary(report: string): string
+   if report == "" then
+      return _("The index was already up to date.")
+   end
+   local indexed: string = "0"
+   for line in report:gmatch("[^\n]+") do
+      local key, value: string, string = line:match("^([%w_]+)=(.*)$")
+      if key == "indexed" then
+         indexed = value
+      end
+   end
+   if indexed == "0" then
+      return _("The index was already up to date.")
+   end
+   return T(_("Indexed %1 books."), indexed)
+end
+
+--- Builds what the reader is looking at, on its own.
+---
+--- The same work a search does before it answers, offered by itself: a reader who
+--- knows they are about to look for something in this folder pays for it once, and
+--- the query after that — and the one after that — goes straight to the index.
+function Turbosearch:index_now()
+   local engine = self:engine()
+   if not engine then
+      UIManager:show(InfoMessage:new{ text = engine_error })
+      return
+   end
+   local settings = self:loadSettings()
+   local handle: any
+   local open_err: string
+   handle, open_err = engine.open_index(settings:readSetting("index_path", "") as string)
+   if not handle then
+      UIManager:show(InfoMessage:new{
+         text = T(_("Could not open the index at %1.\n\n%2"),
+            settings:readSetting("index_path", ""), open_err),
+      })
+      return
+   end
+
+   -- The Index button answers the same question the checkbox asks, so it reads
+   --- the checkbox rather than inventing a scope of its own.
+   local here: string = self:current_directory()
+   local whole: boolean = settings:readSetting("opt_global", self:current_directory() == "") as boolean
+   if here == "" then
+      whole = true
+   end
+   local scope: string = whole and "" or here
+   self:build_index(engine, handle, scope, whole, function(built: boolean, why: string)
+      engine.close(handle)
+      if not built then
+         UIManager:show(InfoMessage:new{
+            text = T(_("Could not index %1.\n\n%2"),
+               scope ~= "" and scope or _("the library"), why),
+         })
+         return
+      end
+      UIManager:show(InfoMessage:new{ text = self:index_summary(why) })
+   end)
 end
 
 --- Opens a book, from wherever the reader was.

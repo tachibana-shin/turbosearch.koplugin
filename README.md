@@ -68,23 +68,40 @@ compiled in, so there is no `libsqlite3` to install on the device.
 ## The KOReader plugin
 
 The plugin searches the library from inside the reader. One popup, in the order a
-reader works through it — what am I looking for, what kind of search is it, go:
+reader works through it — what am I looking for, what kind of search is it, how
+wide a search, build, go:
 
 ```
-┌─ Search in books ────────────────┐
-│ the last query                   │
-│                                  │
-│ ☐ Metadata only                  │
-│ ☐ Regular expression             │
-│                                  │
-│ [⚙ Settings]      [🔍 Search]   │
-└──────────────────────────────────┘
+┌─ Search in books ──────────────────┐
+│ the last query                     │
+│                                    │
+│ ☐ Metadata only                    │
+│ ☐ Regular expression               │
+│ ☐ Search the whole library         │
+│                                    │
+│ [⚙ Settings] [↻ Index] [🔍 Search] │
+└────────────────────────────────────┘
 ```
 
 Each box is a separate index operation rather than a strength setting, so more
 than one can be ticked and the last one wins — which is said on the label rather
 than left to be discovered. The boxes start where the reader left them last time,
 because a reader who looks for an author once looks for another author next.
+
+**Where you are is what is searched.** With a book open it is that book's folder;
+on the main menu it is the folder the browser is showing; with neither there is
+nothing narrower to ask about and the search covers the library. The third box is
+how a reader in a folder asks about every book instead, and it starts off.
+
+The search builds what it is about to answer from, so a folder that has never been
+indexed is indexed on the way to asking about it — no separate step, and nothing
+to remember. What is already indexed costs one `stat` per file and no writes, so
+the second search in a folder costs what the first did. The whole library is
+minutes the first time and seconds after that, so that one is asked about first:
+the scan says how many books are still to read before a single one is opened, and
+the confirm box shows it. **Index** is the same work offered by itself, for a
+reader who knows they are about to look in this folder and would rather pay for
+it once than once per query.
 
 A tap opens the book. The results menu carries each book's title and its format
 on the right, where the reader's own file browser puts it.
@@ -160,14 +177,20 @@ between them from `jit.arch`. An x86-64 library reaching a Kindle fails at
 `ffi.load` with a message about the ELF class, so choosing by name is what keeps
 that from being a search that returns nothing rather than a load that says why.
 
-The plugin only reads an index — building one takes minutes and writes hundreds
-of megabytes, which is not something to do from a menu callback:
+A whole library is still built outside the reader: minutes and hundreds of
+megabytes are not a menu callback, and the confirm box exists so a reader is asked
+before those minutes are spent.
 
 ```sh
 make build && cargo run --release --bin indexer -- <library> <db>
 CONTENT_MODE=full cargo run --release --bin indexer -- <library> <db>  # phrase queries
 ```
-Point the plugin at the index in the reader's settings for the plugin.
+
+Point the plugin at the index in the reader's settings for the plugin. What comes
+after that is the plugin's own — a folder indexed from inside it, a book that
+changed and was read again, a book that was deleted and is no longer an answer —
+through the same stepped session the binary uses, which is why an index built by
+one is an index the other keeps in step.
 
 ## Lua toolchain
 

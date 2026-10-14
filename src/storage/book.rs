@@ -4,7 +4,7 @@
 //! diagnostics because `/mnt/us` on a Kindle is vfat, where inode numbers are
 //! not stable; see `note.md` section 0, row 7.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -410,6 +410,36 @@ pub fn path_in_scope(path: &str, scope: &str) -> bool {
         return true;
     }
     path == scope || path.starts_with(&format!("{scope}/"))
+}
+
+/// The ids a search under `dir` is allowed to return.
+///
+/// A read of `BOOKS` filtered by [`path_in_scope`] rather than a `LIKE` prefix,
+/// because the two rules are not the same: a prefix match sends `/docs` to
+/// everything under `/documents-extra`, and a pattern that forgets the exact
+/// case matches not even the directory itself.
+///
+/// An empty `dir` is the whole index, which is not a shortcut but the point.
+/// Postings outlive the book they belong to — a deleted or re-indexed book
+/// leaves chunks behind that are skipped rather than rewritten — so a search
+/// without this filter answers for books that are no longer there, and the
+/// reader is offered a row that opens nothing. Asking the table once is the
+/// difference between those hits and real ones.
+pub fn scope_ids(engine: &Engine, dir: &str) -> RunResult<BTreeSet<u16>> {
+    engine.block_on(async {
+        let rows: Vec<(i64, String)> = sqlx::query_as("SELECT id, path FROM books")
+            .fetch_all(engine.pool())
+            .await?;
+        let mut out = BTreeSet::new();
+        for (id, path) in rows {
+            if path_in_scope(&path, dir)
+                && let Ok(id) = u16::try_from(id)
+            {
+                out.insert(id);
+            }
+        }
+        Ok(out)
+    })
 }
 
 /// A scope restriction for a query.

@@ -315,6 +315,44 @@ impl Engine {
         })
     }
 
+    /// The id an allocation should start from: one past the highest in use.
+    ///
+    /// Book ids are never reused, and the mark that records how far the handout
+    /// has got lives in `meta` — a row that an index built before allocation was
+    /// wired in simply does not have. Reading it out of `BOOKS` is what stops
+    /// the first allocation after such a build from handing out an id that is
+    /// already a live book.
+    pub fn next_free_book_id(&self) -> RunResult<u16> {
+        self.block_on(async {
+            let highest: Option<i64> = sqlx::query_scalar("SELECT MAX(id) FROM books")
+                .fetch_one(self.pool())
+                .await?;
+            match highest {
+                Some(id) => u16::try_from(id)
+                    .ok()
+                    .and_then(|id| id.checked_add(1))
+                    .ok_or_else(|| RunError::IdRange(id)),
+                None => Ok(0),
+            }
+        })
+    }
+
+    /// The id of the book recorded at `path`, if one is.
+    ///
+    /// An updated file is re-indexed under a fresh id — see
+    /// [`crate::storage::build`], where the row this returns has to go — and
+    /// this is the lookup that finds it.
+    pub fn book_id_by_path(&self, path: &str) -> RunResult<Option<u16>> {
+        self.block_on(async {
+            let id: Option<i64> = sqlx::query_scalar("SELECT id FROM books WHERE path = ?1")
+                .bind(path)
+                .fetch_optional(self.pool())
+                .await?;
+            id.map(|id| u16::try_from(id).map_err(|_| RunError::IdRange(id)))
+                .transpose()
+        })
+    }
+
     /// Drops one book, returning whether it was there.
     ///
     /// The book's `ENTRYMAP` rows go too, or a cached posting could still

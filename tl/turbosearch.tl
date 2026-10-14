@@ -30,9 +30,16 @@ void ts_close(ts_index *handle);
 const char *ts_version(void);
 int ts_content_mode(const ts_index *handle);
 
-char *ts_search(ts_index *handle, const char *query, int *out_count);
-char *ts_search_meta(ts_index *handle, const char *query, int *out_count);
-char *ts_search_regex(ts_index *handle, const char *query, int *out_count);
+/* `scope` restricts a search to one directory; an empty one is everything
+   that has been indexed. */
+char *ts_search(ts_index *handle, const char *query, const char *scope, int *out_count);
+char *ts_search_meta(ts_index *handle, const char *query, const char *scope, int *out_count);
+char *ts_search_regex(ts_index *handle, const char *query, const char *scope, int *out_count);
+
+/* Building, in as many steps as the caller wants to give back control for. */
+int ts_index_begin(ts_index *handle, const char *dir);
+int ts_index_step(ts_index *handle, int budget);
+char *ts_index_end(ts_index *handle);
 char *ts_book_title(ts_index *handle, int book_id);
 char *ts_book_path(ts_index *handle, int book_id);
 
@@ -254,7 +261,10 @@ end
 local function search_pattern(handle: Handle, query: string, opts?: SearchOptions): {Hit}, string
    local o: SearchOptions = opts or {} as SearchOptions
    local indirect: any = ffi.new("int[1]")
-   local buf: any = C.ts_search_regex(handle.ptr, query, indirect)
+   -- A scope of "" is the whole index, which is what the engine answers from
+   -- when nothing narrows it. Passing it down rather than filtering here is what
+   -- keeps the two paths — "only this folder" and "everywhere" — the same query.
+   local buf: any = C.ts_search_regex(handle.ptr, query, o.scope or "", indirect)
    if buf == ffi.NULL then
       return {} as {Hit}, last_error()
    end
@@ -275,7 +285,10 @@ end
 local function search(handle: Handle, query: string, opts?: SearchOptions): {Hit}, string
    local o: SearchOptions = opts or {} as SearchOptions
    local indirect: any = ffi.new("int[1]")
-   local buf: any = C.ts_search(handle.ptr, query, indirect)
+   -- A scope of "" is the whole index, which is what the engine answers from
+   -- when nothing narrows it. Passing it down rather than filtering here is what
+   -- keeps the two paths — "only this folder" and "everywhere" — the same query.
+   local buf: any = C.ts_search(handle.ptr, query, o.scope or "", indirect)
    if buf == ffi.NULL then
       return {} as {Hit}, last_error()
    end
@@ -301,7 +314,10 @@ end
 local function search_meta(handle: Handle, query: string, opts?: SearchOptions): {Hit}, string
    local o: SearchOptions = opts or {} as SearchOptions
    local indirect: any = ffi.new("int[1]")
-   local buf: any = C.ts_search_meta(handle.ptr, query, indirect)
+   -- A scope of "" is the whole index, which is what the engine answers from
+   -- when nothing narrows it. Passing it down rather than filtering here is what
+   -- keeps the two paths — "only this folder" and "everywhere" — the same query.
+   local buf: any = C.ts_search_meta(handle.ptr, query, o.scope or "", indirect)
    if buf == ffi.NULL then
       return {} as {Hit}, last_error()
    end
@@ -353,6 +369,52 @@ local function search_as(handle: Handle, mode: SearchMode, query: string, opts?:
    return search(handle, query, opts)
 end
 
+--- Indexes what `dir` still needs, and says how many files that is.
+---
+--- The scan that answers costs one `stat` per file and writes nothing, which is
+--- what lets a reader be told what the next few minutes will cost before a
+--- single book is opened. An empty `dir` is every configured root — the whole
+--- library, and the slow path.
+---
+--- Returns the count, or -1 plus the engine's reason.
+local function index_begin(handle: Handle, dir: string): integer, string
+   local left: integer = C.ts_index_begin(handle.ptr, dir)
+   if left < 0 then
+      return -1, last_error()
+   end
+   return left, ""
+end
+
+--- Reads and indexes at most `budget` of the files a session has left, and says
+--- what is still to do.
+---
+--- Stepped rather than done in one call because a screen cannot be redrawn from
+--- inside a call that never returns: the reader hands control back between
+--- batches, and the engine gets to be interrupted by somebody closing the book.
+---
+--- Returns the number still left, or -1 plus the engine's reason.
+local function index_step(handle: Handle, budget: integer): integer, string
+   local left: integer = C.ts_index_step(handle.ptr, budget)
+   if left < 0 then
+      return -1, last_error()
+   end
+   return left, ""
+end
+
+--- Ends a session: the metadata it held is written, and the handle's dictionary
+--- is reloaded so the next search sees what was just indexed.
+---
+--- Returns what the session did as `key=value` lines, or nil plus the reason.
+local function index_end(handle: Handle): string, string
+   local buf: any = C.ts_index_end(handle.ptr)
+   if buf == ffi.NULL then
+      return nil, last_error()
+   end
+   local text: string = ffi.string(buf)
+   C.ts_free(buf)
+   return text, ""
+end
+
 return {
    Hit = Hit,
    Mode = Mode,
@@ -372,6 +434,9 @@ return {
    search_as = search_as,
    search_pattern = search_pattern,
    index_info = index_info,
+   index_begin = index_begin,
+   index_step = index_step,
+   index_end = index_end,
    --- The whole config, as `key = value` lines.
    ---
    --- One handle, one read, closed by the caller — the same borrow a search uses.

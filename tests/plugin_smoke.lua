@@ -11,6 +11,13 @@
 local PLUGIN_DIR = "build/turbosearch.koplugin/"
 local PLUGIN = PLUGIN_DIR .. "main.lua"
 local INDEX = os.getenv("TS_TEST_INDEX") or "/tmp/opencode/e2e.idx"
+--- The words the index is expected to answer.
+---
+--- Overridable because the index is whatever library was built for it, and a
+--- test that hard-codes a phrase only passes when that phrase happens to be in
+--- the books — which says something about the library, not about the plugin.
+local QUERY = os.getenv("TS_TEST_QUERY") or "Yukino"
+local META_QUERY = os.getenv("TS_TEST_META_QUERY") or "Oregairu"
 
 local captured = {}
 local failures = {}
@@ -216,7 +223,7 @@ check("the dialog has input", captured.dialog and captured.dialog.input ~= nil)
 --- The options the popup carries. Each is a checkbox under the input, and the
 --- reader reads them back when Search is pressed.
 local boxes = captured.dialog and captured.dialog.added or {}
-check("the popup shows an option per index operation", #boxes == 2,
+check("the popup shows an option per question it can ask", #boxes == 3,
     #boxes .. " boxes")
 local texts = {}
 for _, box in ipairs(boxes) do texts[box.text] = true end
@@ -224,23 +231,47 @@ check("metadata is one of the options",
     texts["Metadata only — skip the book contents"] == true, texts)
 check("a regular expression is one of the options",
     texts["Regular expression — over the terms"] == true, texts)
+--- The box follows where the reader is, rather than being a fixed default: with
+--- no folder to speak of there is nothing narrower to search, and with a book
+--- open the folder it is in is the answer a search from inside it means.
+check("the whole library is an option",
+    texts["Search the whole library"] == true, texts)
+check("and it is on when there is no folder here",
+    boxes[3].checked == true, boxes[3].checked)
+instance.ui = { document = { file = "/mnt/us/documents/Novels/moi.epub" } }
+captured.dialog = nil
+instance:onTurbosearchSearch()
+local here_boxes = captured.dialog and captured.dialog.added or {}
+check("the folder a book is in is what a search from inside it covers",
+    here_boxes[3] and here_boxes[3].checked == false,
+    here_boxes[3] and here_boxes[3].checked)
+check("and it is named for the reader, not for the index",
+    instance:current_directory() == "/mnt/us/documents/Novels",
+    instance:current_directory())
+instance.ui = nil
 
---- The buttons: settings on the left, search on the right, each with an icon.
+--- The buttons: settings on the left, search on the right, indexing between
+--- them — the same order as the work, settings before anything is read, the
+--- index built, the question asked.
 local row = captured.dialog and captured.dialog.buttons
     and captured.dialog.buttons[2] or {}
-check("settings and search are two buttons in one row", #row == 2, #row)
+check("three buttons in one row", #row == 3, #row)
 --- Each button starts with a nerdfont glyph in the Private Use Area, which the
 --- reader draws through its fallback font — a character, not a decoded image.
 check("settings is on the left", row[1] and row[1].text:find("Settings"),
     row[1] and row[1].text)
-check("search is on the right", row[2] and row[2].text:find("Search"),
+check("indexing sits between them", row[2] and row[2].text:find("Index"),
     row[2] and row[2].text)
+check("search is on the right", row[3] and row[3].text:find("Search"),
+    row[3] and row[3].text)
 check("each button carries a nerdfont glyph",
-    row[1] and #row[1].text > #("Settings") and row[2] and #row[2].text > #("Search"),
+    row[1] and #row[1].text > #("Settings")
+    and row[2] and #row[2].text > #("Index")
+    and row[3] and #row[3].text > #("Search"),
     row[1] and row[1].text)
 
 captured.menu = nil
-instance:search("thám tử")
+instance:search(QUERY)
 check("a content search shows a menu", captured.menu ~= nil,
     captured.info and captured.info.text or "nothing was shown")
 if not captured.menu then
@@ -261,7 +292,7 @@ check("the format is the file's suffix, capitalised",
     first and first.mandatory == first.path:match("%.([^%.]+)$"):upper(),
     first and first.mandatory)
 check("the subtitle names the query",
-    captured.menu and captured.menu.subtitle:find("thám tử", 1, true) ~= nil)
+    captured.menu and captured.menu.subtitle:find(QUERY, 1, true) ~= nil)
 
 io.write("\nsearch modes\n")
 
@@ -273,7 +304,7 @@ for _, mode in ipairs(modes) do
     -- The phrase is what Text is for, and the Japanese name is what the other
     -- two are for: it must appear in one under content search and in both under
     -- metadata or pattern, which is what makes the modes a real choice.
-    local query = mode == "Text" and "thám tử" or "higashino"
+    local query = mode == "Text" and QUERY or META_QUERY
     instance:loadSettings():saveSetting("search_mode", mode)
     captured.menu = nil
     instance:search(query)
@@ -288,8 +319,9 @@ end
 instance:loadSettings():saveSetting("search_mode", "Text")
 
 captured.menu = nil
-instance:search("higashino")
-check("an author-only query still finds something", captured.menu and #captured.menu.item_table > 0,
+instance:search(META_QUERY)
+check("a query that is a title rather than a word still finds something",
+    captured.menu and #captured.menu.item_table > 0,
     captured.menu and #captured.menu.item_table)
 
 io.write("\nempty and rejected queries\n")
@@ -310,7 +342,7 @@ io.write("\nopening a book\n")
 -- with no path, which is the correct thing for that screen and the wrong row to
 -- try to open.
 captured.menu = nil
-instance:search("thám tử")
+instance:search(QUERY)
 local path = captured.menu and captured.menu.item_table[1]
     and captured.menu.item_table[1].path
 check("a row to open exists", path and path ~= "", path)
@@ -426,11 +458,84 @@ check("a real index path does have one",
     screen:env_file_path() == "/tmp/opencode/turbosearch-test.env",
     screen:env_file_path())
 
+io.write("\nscoping\n")
+
+-- A library of two folders, built here rather than assumed. The claim being
+-- checked is that a search from inside one of them does not answer out of the
+-- other, and that is only worth checking against an index really built from
+-- these files — a fixture would be asserting about itself.
+local lib = "/tmp/opencode/turbosearch-smoke-lib"
+local alpha, alpha_extra = lib .. "/alpha", lib .. "/alpha-extra"
+local function write_book(dir, name, word)
+    os.execute("mkdir -p '" .. dir .. "'")
+    local f = assert(io.open(dir .. "/" .. name, "w"))
+    local line = "Câu chuyện nói về " .. word .. ", một nhân vật hư cấu. "
+    for _ = 1, 400 do f:write(line) end
+    f:close()
+end
+write_book(alpha, "one.txt", "Zephyrinal")
+write_book(alpha_extra, "two.txt", "Quixotran")
+
+local scoped = "/tmp/opencode/turbosearch-smoke.idx"
+os.execute("rm -f '" .. scoped .. "' '" .. scoped .. "-wal' '" .. scoped .. "-shm'")
+os.execute("./target/release/indexer '" .. lib .. "' '" .. scoped .. "' 2>/dev/null")
+local real_index = instance:loadSettings():readSetting("index_path")
+instance:loadSettings():saveSetting("index_path", scoped)
+
+-- The file the last search really offered, or nil when it was the empty screen.
+--
+-- A search with no hits is not an absence of menu: it is a menu of its own, one
+-- row saying there is nothing, which is worth reading. Counting rows would call
+-- both of them "one"; the path tells them apart.
+local function found_path()
+    local row = captured.menu and captured.menu.item_table
+        and captured.menu.item_table[1]
+    if row and row.path ~= "" then return row.path end
+    return nil
+end
+
+-- Standing in a folder, which is what the boxes say unless they were left asking
+-- for every book. `readSearchOptions` is what the Search button calls.
+instance.ui = { document = { file = alpha .. "/one.txt" } }
+check("a reader in a folder is read as standing in it",
+    instance:current_directory() == alpha, instance:current_directory())
+captured.menu = nil
+instance:search("Zephyrinal", instance:readSearchOptions())
+check("a search from inside a folder finds that folder's book",
+    found_path() == alpha .. "/one.txt", found_path())
+
+captured.menu = nil
+captured.info = nil
+instance:search("Quixotran", instance:readSearchOptions())
+check("and does not answer out of the folder next door",
+    found_path() == nil,
+    found_path() or (captured.menu and captured.menu.subtitle)
+        or (captured.info and captured.info.text))
+
+-- Asking for every book, from the same place: the folder is still where the
+-- reader is, and only the box says otherwise.
+captured.menu = nil
+instance.ui = nil
+instance:search("Quixotran", { scope = "", whole = true })
+check("the whole library reaches the folder next door too",
+    found_path() == alpha_extra .. "/two.txt", found_path())
+
+-- Indexing what is here, on its own, leaves nothing for the next search to do.
+instance.ui = { document = { file = alpha_extra .. "/two.txt" } }
+captured.info = nil
+captured.menu = nil
+instance:index_now()
+check("indexing an already-built folder says so rather than claiming work",
+    captured.info and captured.info.text:find("up to date", 1, true) ~= nil,
+    captured.info and captured.info.text)
+instance:loadSettings():saveSetting("index_path", real_index)
+instance.ui = nil
+
 io.write("\nrebuilding the menu\n")
 -- The handle is closed before the menu is built, so a second search must work
 -- from a fresh open rather than reuse one that was already closed.
 captured.menu = nil
-instance:search("thám tử")
+instance:search(QUERY)
 check("a second search works", captured.menu and #captured.menu.item_table > 0)
 
 io.write("\n")
