@@ -53,12 +53,16 @@ pub struct BookMeta {
     pub identifiers: Vec<String>,
 }
 
-/// A `<manifest>` item: an id, a resolved archive path, and a media type.
+/// A `<manifest>` item: an id, a resolved archive path, a media type, and
+/// whether it is the navigation document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestItem {
     pub id: String,
     pub href: String,
     pub media_type: String,
+    /// `properties="nav"` — the EPUB 3 navigation document, a table of contents
+    /// in markup.
+    pub is_nav: bool,
 }
 
 /// The parsed OPF, ready to be resolved against the archive.
@@ -176,10 +180,15 @@ pub fn parse_package(opf: &[u8]) -> Package {
                         if let (Some(id), Some(href)) =
                             (attr_value(e, b"id"), attr_value(e, b"href"))
                         {
+                            let properties = attr_value(e, b"properties").unwrap_or_default();
                             pkg.manifest.push(ManifestItem {
                                 id,
                                 href,
                                 media_type: attr_value(e, b"media-type").unwrap_or_default(),
+                                // Split, because `properties` is a space-separated
+                                // list and a nav document may also be
+                                // `properties="scripted"`.
+                                is_nav: properties.split_whitespace().any(|p| p == "nav"),
                             });
                         }
                     }
@@ -399,6 +408,14 @@ pub fn open(path: &std::path::Path) -> Result<BookContent, OpenError> {
             // An idref that is not in the manifest is skipped, not fatal.
             continue;
         };
+        if item.is_nav {
+            // The navigation document is a table of contents in markup: a list of
+            // chapter titles, each of them one word long and every one of them
+            // already in the book's prose. Indexing it made a search for a word
+            // that happens to be in a chapter title answer with the contents
+            // page instead of the page the reader wanted.
+            continue;
+        }
         if !is_content_item(&item.href, &item.media_type) {
             continue;
         }

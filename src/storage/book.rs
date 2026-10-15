@@ -319,13 +319,21 @@ pub enum ScanMode {
 ///
 /// `roots` is always the set of directories this pass actually visited; `mode`
 /// only widens or narrows what the pass is allowed to conclude about books it
-/// did not visit.
+/// did not visit; `text_layout` is the shape of text this build extracts, and a
+/// book recorded under an older one is re-read rather than trusted.
 pub fn scan_with_mode(
     engine: &Engine,
     filter: &FileFilter,
     roots: &[PathBuf],
     mode: ScanMode,
+    text_layout: u32,
 ) -> RunResult<ScanPlan> {
+    // `None` — nothing recorded — is the layout zero, not the current one: an
+    // index that never said which layout it was built with is one whose entry
+    // maps point at text nobody can vouch for.
+    let stored_layout = engine.text_layout().unwrap_or(None).unwrap_or(0);
+    let wanted = text_layout;
+
     // Load every stored book once so the walk performs no per-file query.
     let known: HashMap<String, (u16, Book)> = engine
         .read_paths()?
@@ -357,7 +365,17 @@ pub fn scan_with_mode(
             match known.get(&key) {
                 None => plan.new.push(entry),
                 Some((_, stored)) => {
-                    if stored.size == entry.size && stored.mtime_ms == entry.mtime_ms {
+                    // Unchanged is only about the file. `text_layout` is the
+                    // other half: an entry map holds byte offsets into the text
+                    // the extractor produced, so a book indexed before the
+                    // layout changed has postings that still answer and a
+                    // sentence that is no longer there. Those come back as
+                    // updated and are read again, which is the one re-read that
+                    // is worth its cost.
+                    if stored.size == entry.size
+                        && stored.mtime_ms == entry.mtime_ms
+                        && stored_layout >= wanted
+                    {
                         plan.unchanged.push(entry.path);
                     } else {
                         plan.updated.push(entry);
@@ -501,12 +519,19 @@ pub fn scan_scope(
         filter,
         &[dir.as_ref().to_path_buf()],
         ScanMode::Scope,
+        crate::format::html::TEXT_LAYOUT,
     )
 }
 
 /// Sweeps every configured source directory.
 pub fn scan_full(engine: &Engine, config: &Config) -> RunResult<ScanPlan> {
-    scan_with_mode(engine, &config.filter(), &config.roots(), ScanMode::Full)
+    scan_with_mode(
+        engine,
+        &config.filter(),
+        &config.roots(),
+        ScanMode::Full,
+        crate::format::html::TEXT_LAYOUT,
+    )
 }
 
 fn walk_root(

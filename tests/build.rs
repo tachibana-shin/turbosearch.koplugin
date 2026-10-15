@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use turbosearch::index::{dict, query};
 use turbosearch::storage::Engine;
 use turbosearch::storage::book::scope_ids;
-use turbosearch::storage::build::{BuildStats, Session, plan_scope};
+use turbosearch::storage::build::{self, BuildStats, Session, plan_scope};
 use turbosearch::storage::config::ContentMode;
 
 /// A folder of files and the index beside it.
@@ -70,6 +70,102 @@ fn hits(engine: &Engine, word: &str, scope: &str) -> Vec<query::Hit> {
     let d = dict::load(engine).expect("dictionary");
     let raw = query::search_phrase(engine, &d, word).expect("search");
     query::live_hits(engine, raw, scope).expect("live hits")
+}
+
+/// The sentence a match is in comes from decoding the book again.
+///
+/// The index stores where a word is, never what it is: there is no sentence in
+/// SQLite to recover, only a position and the entry map that leads to it. So a
+/// preview is a read of the book, which is why it is one call per question a
+/// reader asks rather than four more columns on every search — and why it is
+/// `None` and not an error when the book is gone.
+#[test]
+fn the_sentence_a_match_is_in_comes_from_the_book() {
+    let shelf = Shelf::new();
+    shelf.write(
+        "one.txt",
+        "A baker has arrived in this town. Conan is here. ",
+    );
+    shelf.index();
+
+    let engine = shelf.engine();
+    let d = dict::load(&engine).expect("dictionary");
+    let raw = query::search_phrase(&engine, &d, "Conan").expect("search");
+    let live = query::live_hits(&engine, raw, "").expect("live hits");
+    assert_eq!(live.len(), 1, "the book is found");
+    let hit = live[0].clone();
+
+    let sentence = build::snippet_for(&engine, hit.doc_id, hit.entry_idx, hit.first_position, 60)
+        .expect("the book is still there")
+        .expect("the section is still the same shape");
+    assert!(
+        sentence.contains("Conan"),
+        "the sentence has the word in it: {sentence}"
+    );
+    assert!(
+        sentence.contains("baker"),
+        "and the rest of the sentence, not just the word: {sentence}"
+    );
+
+    // Gone, and therefore not an answer and not a sentence.
+    fs::remove_file(shelf.root.join("one.txt")).expect("remove the book");
+    shelf.index();
+    let d = dict::load(&engine).expect("dictionary after the removal");
+    let raw = query::search_phrase(&engine, &d, "Conan").expect("search again");
+    assert_eq!(
+        query::live_hits(&engine, raw, "").expect("live hits").len(),
+        0,
+        "a book that went away stops being an answer"
+    );
+    assert!(
+        build::snippet_for(&engine, hit.doc_id, hit.entry_idx, hit.first_position, 60)
+            .expect("no re-read")
+            .is_none(),
+        "and has no sentence left to show"
+    );
+}
+
+/// An index whose recorded layout is gone gets every book read again.
+///
+/// An entry map holds byte offsets into the text the extractor produced, so when
+/// the layout changes those offsets point at different words while the postings
+/// go on answering. A search succeeds, the sentence beside it comes from the
+/// wrong place, and nothing on the screen says so — which is the only failure
+/// mode worth a rebuild over.
+#[test]
+fn an_index_with_no_recorded_layout_is_read_again() {
+    let shelf = Shelf::new();
+    shelf.write("one.txt", "A book about Zephyrinal the inventor. ");
+    shelf.index();
+
+    let engine = shelf.engine();
+    assert_eq!(
+        engine.text_layout().unwrap(),
+        Some(turbosearch::format::html::TEXT_LAYOUT),
+        "a session that read a book records what it read"
+    );
+
+    // The same pass again: nothing has moved, so nothing is read.
+    let stats = shelf.index();
+    assert_eq!(stats.indexed, 0, "an unchanged file is not read again");
+
+    engine.reset_text_layout().unwrap();
+    let stats = shelf.index();
+    assert_eq!(stats.indexed, 1, "and with the record gone it is");
+    assert_eq!(
+        engine.text_layout().unwrap(),
+        Some(turbosearch::format::html::TEXT_LAYOUT),
+        "and the record is made again by the pass that read it"
+    );
+
+    // Backwards is never believed: an older build finishing behind a newer one
+    // would be claiming something about books it never touched.
+    engine.set_text_layout(0).unwrap();
+    assert_eq!(
+        engine.text_layout().unwrap(),
+        Some(turbosearch::format::html::TEXT_LAYOUT),
+        "the record only moves forward"
+    );
 }
 
 /// An index that has grown must not be given ids it is already using.

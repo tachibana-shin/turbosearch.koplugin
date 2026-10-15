@@ -19,6 +19,7 @@ local CheckButton = require("ui/widget/checkbutton")
 local ConfirmBox = require("ui/widget/confirmbox")
 local InputDialog = require("ui/widget/inputdialog")
 local LuaSettings = require("luasettings")
+local BookList = require("ui/widget/booklist")
 local Menu = require("ui/widget/menu")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
@@ -38,6 +39,8 @@ local record EngineBinding
    open_index: function(string): any, string
    close: function(any)
    search_as: function(any, any, string, any): {Hit}, string
+   --- The sentence a hit is in. An empty string means there is none.
+   snippet: function(any, integer, integer, integer): string, string
    book_title: function(any, integer): string
    book_path: function(any, integer): string
    index_info: function(any): any
@@ -178,13 +181,32 @@ local settings_object: SettingsFile = nil as SettingsFile
 local record Hit
    doc_id: integer
    score: integer
+   entry_idx: integer
+   position: integer
 end
 
---- One row of a results list: a book's title and where it is.
+--- One row of a results list: a book, where it is, and where in it the match
+--- is.
 local record ResultRow
    text: string
    mandatory: string
    path: string
+   --- Which book the row belongs to, and where in that book the match is. Both
+   --- are here for the sentence: a row nobody looks closer at never pays for
+   --- them, and the sentence is the reason the row was built.
+   doc_id: integer
+   entry_idx: integer
+   position: integer
+   --- The sentence, once it has been read. Held here so a reader who looks at
+   --- the same row twice reads the book once.
+   preview: string
+   --- Whether it has been looked for yet. A string cannot say "not yet", and
+   --- "not yet" and "there is none" are two different answers to show.
+   looked: boolean
+   --- A metadata hit has no sentence behind it — it matched the title page, not
+   --- the text — and asking a book for the sentence around position 0 is asking
+   --- it for its opening line, which is not what was searched for.
+   can_preview: boolean
 end
 
 --- The plugin, in the shape KOReader loads it.
@@ -234,10 +256,19 @@ local record Turbosearch
    step_index: function(Turbosearch, EngineBinding, any, integer, function(boolean, string))
    index_now: function(Turbosearch)
    close_index_message: function(Turbosearch)
+   --- The engine, for a read that happens after the search closed its own
+   --- handle: a sentence is read when the reader asks, which is later.
+   reopen_engine: function(Turbosearch): EngineBinding
+   --- What a tap on a row means: the sentence, and the book behind it.
+   show_row: function(Turbosearch, ResultRow)
+   --- Reads the sentence out of the book — the only expensive thing a search
+   --- does once it has already answered.
+   read_sentence: function(Turbosearch, ResultRow): string
    index_summary: function(Turbosearch, string): string
    index_message: any
    --- The query's results, shown once the index is up to date.
    results: function(Turbosearch, EngineBinding, any, string, {string: any})
+
    onDispatcherRegisterActions: function(Turbosearch)
    addToMainMenu: function(Turbosearch, {string: any})
    onTurbosearchSearch: function(Turbosearch)
@@ -649,56 +680,6 @@ end
 ---
 --- The handle is closed by whichever branch of it ends the trip, so no handle has
 --- to outlive the search that opened it.
-function Turbosearch:results(engine: EngineBinding, handle: any, query: string,
-                             opts: {string: any})
-   local hits, how = self:query(engine, handle, query, opts)
-   if not hits then
-      engine.close(handle)
-      UIManager:show(InfoMessage:new{ text = how })
-      return
-   end
-
-   local items: {ResultRow} = {}
-   for i = 1, math.min(#hits, MAX_RESULTS) do
-      local hit = hits[i]
-      local path: string = engine.book_path(handle, hit.doc_id)
-      local title: string = engine.book_title(handle, hit.doc_id)
-      -- The format goes on the right, where the reader's own file browser puts
-      -- it: a list of Vietnamese titles is a list of strings that all begin the
-      -- same way, and the format is the one distinguishing thing a row can carry
-      -- without a second line.
-      local suffix: string = path:match("%.([^%.]+)$") or ""
-      items[i] = {
-         text = title ~= "" and title or path:match("[^/]+$"),
-         mandatory = suffix:upper(),
-         path = path,
-      }
-   end
-   engine.close(handle)
-
-   if #items == 0 then
-      self:showEmpty(query)
-      return
-   end
-
-   self.result_menu = Menu:new{
-      title = _("Search results"),
-      subtitle = T(_("“%1” — %2, %3"), query, how, self:count_text(#hits)),
-      item_table = items,
-      covers_full_width = true,
-      onMenuSelect = function(_menu, item: ResultRow)
-         self:openBook(item.path)
-      end,
-   }
-   UIManager:show(self.result_menu)
-end
-
---- Runs the query in whichever mode the reader chose.
----
---- The dispatch is inside the binding so a caller cannot send a pattern to the
---- phrase path and quietly get a phrase: the three are separate index operations,
---- not one operation with a flag. Returns the hits plus a phrase saying where they
---- came from, or nil plus an error message.
 function Turbosearch:query(engine: EngineBinding, handle, query: string,
                            opts?: {string: any}): {Hit}, string
    local chosen: {string: any} = opts or {} as {string: any}
@@ -732,13 +713,136 @@ function Turbosearch:count_text(count: integer): string
    return T(_("%1 book(s)"), count)
 end
 
---- Shows the empty state on the menu rather than in a dialog, so the reader
---- starts the next query from where the list would have been.
+function Turbosearch:results(engine: EngineBinding, handle: any, query: string,
+                             opts: {string: any})
+   local hits, how = self:query(engine, handle, query, opts)
+   if not hits then
+      engine.close(handle)
+      UIManager:show(InfoMessage:new{ text = how })
+      return
+   end
+
+   -- A metadata hit matched the cover and the title page, not the text, so it
+   --- has no sentence behind it and a row that offers one would be offering its
+   --- opening line.
+   local can_preview: boolean = ((opts.mode or "Text") as string) ~= "Metadata"
+
+   local items: {ResultRow} = {}
+   for i = 1, math.min(#hits, MAX_RESULTS) do
+      local hit = hits[i]
+      local path: string = engine.book_path(handle, hit.doc_id)
+      local title: string = engine.book_title(handle, hit.doc_id)
+      items[i] = {
+         text = title ~= "" and title or path:match("[^/]+$"),
+         mandatory = (path:match("%.([^%.]+)$") or ""):upper(),
+         path = path,
+         doc_id = hit.doc_id,
+         entry_idx = hit.entry_idx,
+         position = hit.position,
+         preview = "",
+         looked = false,
+         can_preview = can_preview,
+      }
+   end
+   engine.close(handle)
+
+   if #items == 0 then
+      self:showEmpty(query)
+      return
+   end
+
+   --- A book list and not a menu, which is the same thing wearing the reader's
+   --- own clothes: reads a row's path for its cover, its status and its sidecar,
+   --- exactly as the file browser's book tabs do. A results list that looks like
+   --- the shelf the book came from is the difference between a search and a tool.
+   self.result_menu = BookList:new{
+      title = _("Search results"),
+      subtitle = T(_("“%1” — %2, %3"), query, how, self:count_text(#hits)),
+      item_table = items,
+      covers_full_width = true,
+      --- No letters down the edge: a reader is not typing into a shelf, and an
+      --- alphabet beside every row is the one thing that made a results list
+      --- look like a debug screen rather than a list of books.
+      is_enable_shortcut = false,
+      --- Every row comes from the same book list, so a row that opens is a row
+      --- CoverBrowser would draw a cover beside.
+      onMenuSelect = function(_menu, item: ResultRow)
+         self:show_row(item)
+      end,
+   }
+   UIManager:show(self.result_menu)
+end
+
+--- What a tap on a row means.
 ---
---- The single row is there because an empty item_table renders a blank list and no
---- explanation: Menu would show the title and nothing else, and a reader who typed
---- a query is owed to know it ran. There is no `dimmed` to grey it out with on
---- this reader's version, so the text says it instead.
+--- The sentence, when the match is in the text: the reader did not search for a
+--- book, they searched for a word, and the sentence is what answers that. The
+--- book is one tap further on, which is where it belongs — a reader who wanted
+--- the book itself would have opened it from the shelf.
+---
+--- A hit with no sentence behind it — a metadata match, or a book whose sections
+--- have moved since it was indexed — opens the book. There is nothing to show,
+--- and a tap that opens a box to say so is a tap wasted.
+function Turbosearch:show_row(row: ResultRow)
+   if row.can_preview and not row.looked then
+      row.preview = self:read_sentence(row)
+      row.looked = true
+   end
+
+   local sentence: string = row.preview or ""
+   if sentence == "" then
+      self:openBook(row.path)
+      return
+   end
+
+   --- The sentence in a box, with the book behind it. `TextViewer` would let a
+   --- reader resize and scroll it, but a sentence is two lines at most and a tap
+   --- elsewhere is a tap on the book.
+   UIManager:show(ConfirmBox:new{
+      text = sentence,
+      --- A glyph before the sentence, because a plain box over a list looks like
+      --- an error until it is read.
+      icon = "text",
+      ok_text = _("Open"),
+      cancel_text = _("Back"),
+      ok_callback = function()
+         self:openBook(row.path)
+      end,
+   })
+end
+
+--- Reads the sentence a match is in, out of the book it is in.
+---
+--- A second handle: the search closed its own before it built the rows, and a
+--- sentence is asked for later than that. Opening the index again costs a page
+--- of SQLite, and the decode it pays for beside it is a thousand times that, so
+--- sharing the handle would save nothing and would need a row to outlive its
+--- search.
+---
+--- An empty string on the way out, and no box about it: the reader asked a
+--- question the book can no longer answer, and the book is still there to open.
+function Turbosearch:read_sentence(row: ResultRow): string
+   local engine = self:engine()
+   if not engine then
+      return ""
+   end
+   local settings = self:loadSettings()
+   local handle: any = engine.open_index(
+      settings:readSetting("index_path", "") as string)
+   if not handle then
+      return ""
+   end
+
+   local text: string
+   local snippet_err: string
+   text, snippet_err = engine.snippet(handle, row.doc_id, row.entry_idx, row.position)
+   engine.close(handle)
+   if snippet_err ~= "" then
+      return ""
+   end
+   return text
+end
+
 function Turbosearch:showEmpty(query: string)
    self.result_menu = Menu:new{
       title = _("Search results"),

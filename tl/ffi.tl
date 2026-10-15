@@ -22,6 +22,7 @@ local record CLibrary
    ts_search: function(any, string, string, any): any
    ts_search_meta: function(any, string, string, any): any
    ts_search_regex: function(any, string, string, any): any
+   ts_snippet: function(any, integer, integer, integer, integer): any
    -- Building, handed back one batch at a time so the reader can still draw.
    -- `ts_index_begin` answers with how many files still need reading, which is
    -- one `stat` each and no writes at all.

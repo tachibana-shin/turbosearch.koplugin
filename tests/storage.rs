@@ -69,10 +69,18 @@ impl Shelf {
             &self.filter(),
             &[self.dir.path().to_path_buf()],
             ScanMode::Scope,
+            turbosearch::format::html::TEXT_LAYOUT,
         )
     }
 }
 
+/// A book as the indexer writes one.
+///
+/// The layout record is set here rather than at each call site because every
+/// book written through `put` is written by a build of the layout that is
+/// current now — which is the same claim a real pass makes when it records the
+/// layout. Written here, a writer test exercises the scanner rather than arguing
+/// with it.
 fn book(path: &str, size: u64, mtime: i64) -> Book {
     Book {
         path: path.to_string(),
@@ -410,6 +418,19 @@ fn allocate_reports_when_id_space_exhausted() {
 // Scan
 // ---------------------------------------------------------------------------
 
+/// What a pass does after it reads a book: writes the row, and records the
+/// layout the row's entry map was written against.
+///
+/// A scanner test that skips the second half is describing an index that could
+/// never exist — the layout record is what lets the next pass leave the book
+/// alone, so a test that omits it is testing the scan against a lie.
+fn record(s: &Shelf, id: u16, b: &Book) {
+    s.engine.put_book(id, b).unwrap();
+    s.engine
+        .set_text_layout(turbosearch::format::html::TEXT_LAYOUT)
+        .unwrap();
+}
+
 #[test]
 fn scan_finds_new_files() {
     let s = Shelf::new("scan-new");
@@ -432,12 +453,11 @@ fn scan_is_idempotent_when_nothing_changes() {
     let plan1 = s.scan().unwrap();
     assert_eq!(plan1.new.len(), 1);
     let entry = plan1.new[0].clone();
-    s.engine
-        .put_book(
-            1,
-            &book(&entry.path.to_string_lossy(), entry.size, entry.mtime_ms),
-        )
-        .unwrap();
+    record(
+        &s,
+        1,
+        &book(&entry.path.to_string_lossy(), entry.size, entry.mtime_ms),
+    );
 
     let plan2 = s.scan().unwrap();
     assert_eq!(plan2.new.len(), 0, "nothing new on the second pass");
@@ -503,12 +523,11 @@ fn scan_finds_deleted_books() {
     s.write_file("b.epub", BODY);
     let plan = s.scan().unwrap();
     for (i, e) in plan.new.iter().enumerate() {
-        s.engine
-            .put_book(
-                i as u16,
-                &book(&e.path.to_string_lossy(), e.size, e.mtime_ms),
-            )
-            .unwrap();
+        record(
+            &s,
+            i as u16,
+            &book(&e.path.to_string_lossy(), e.size, e.mtime_ms),
+        );
     }
     fs::remove_file(s.dir.path().join("a.epub")).unwrap();
 
@@ -554,6 +573,9 @@ fn scan_orders_work_by_mtime_descending() {
 fn size_bounds_are_enforced() {
     let s = Shelf::new("scan-size");
     // Written directly, bypassing the padding helper, so the sizes are exact.
+    s.engine
+        .set_text_layout(turbosearch::format::html::TEXT_LAYOUT)
+        .unwrap();
     fs::write(s.dir.path().join("tiny.epub"), "x").unwrap();
     fs::write(s.dir.path().join("big.epub"), "z".repeat(40 * 1024)).unwrap();
     fs::write(s.dir.path().join("huge.epub"), "z".repeat(200 * 1024)).unwrap();
@@ -563,6 +585,7 @@ fn size_bounds_are_enforced() {
         &Config::default().filter(),
         &[s.dir.path().to_path_buf()],
         ScanMode::Scope,
+        turbosearch::format::html::TEXT_LAYOUT,
     )
     .unwrap();
     let names: Vec<String> = plan
@@ -589,6 +612,7 @@ fn size_bounds_are_enforced() {
         &cfg.filter(),
         &[s.dir.path().to_path_buf()],
         ScanMode::Scope,
+        turbosearch::format::html::TEXT_LAYOUT,
     )
     .unwrap();
     let names: Vec<String> = plan
@@ -633,6 +657,7 @@ fn scan_tolerates_a_missing_root() {
         &s.filter(),
         &[s.dir.path().join("does-not-exist")],
         ScanMode::Scope,
+        turbosearch::format::html::TEXT_LAYOUT,
     )
     .unwrap();
     assert!(plan.new.is_empty());
@@ -651,7 +676,14 @@ fn scan_tolerates_permission_denied_subdirectory() {
         .unwrap();
 
     // The scan over a bogus root must not panic or error.
-    let plan2 = scan_with_mode(&s.engine, &s.filter(), &[file_root], ScanMode::Scope).unwrap();
+    let plan2 = scan_with_mode(
+        &s.engine,
+        &s.filter(),
+        &[file_root],
+        ScanMode::Scope,
+        turbosearch::format::html::TEXT_LAYOUT,
+    )
+    .unwrap();
     assert_eq!(plan2.new.len(), 0, "a file root yields no candidates");
 
     // Crucially, the indexed book must NOT be reported missing: an unreadable
@@ -1063,12 +1095,11 @@ fn full_scan_after_scope_scan_does_not_delete_the_scoped_books() {
     let scope = s.dir.path().join("Books/A");
     let plan = scan_scope(&s.engine, &s.filter(), &scope).unwrap();
     for (i, e) in plan.new.iter().enumerate() {
-        s.engine
-            .put_book(
-                i as u16,
-                &book(&e.path.to_string_lossy(), e.size, e.mtime_ms),
-            )
-            .unwrap();
+        record(
+            &s,
+            i as u16,
+            &book(&e.path.to_string_lossy(), e.size, e.mtime_ms),
+        );
     }
 
     // Now sweep a DIFFERENT root. B's book is new; A's books are untouched.
@@ -1098,12 +1129,11 @@ fn deleting_a_book_inside_the_scanned_root_is_reported() {
     let scope = s.dir.path().join("scope");
     let plan = scan_scope(&s.engine, &s.filter(), &scope).unwrap();
     for (i, e) in plan.new.iter().enumerate() {
-        s.engine
-            .put_book(
-                i as u16,
-                &book(&e.path.to_string_lossy(), e.size, e.mtime_ms),
-            )
-            .unwrap();
+        record(
+            &s,
+            i as u16,
+            &book(&e.path.to_string_lossy(), e.size, e.mtime_ms),
+        );
     }
     fs::remove_file(s.dir.path().join("scope/a.epub")).unwrap();
 
@@ -1157,7 +1187,8 @@ fn scope_search_is_cheap_relative_to_a_full_scan() {
                 &s.engine,
                 &s.filter(),
                 &[s.dir.path().to_path_buf()],
-                ScanMode::Full
+                ScanMode::Full,
+                turbosearch::format::html::TEXT_LAYOUT
             )
             .unwrap()
             .new

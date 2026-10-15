@@ -36,6 +36,10 @@ char *ts_search(ts_index *handle, const char *query, const char *scope, int *out
 char *ts_search_meta(ts_index *handle, const char *query, const char *scope, int *out_count);
 char *ts_search_regex(ts_index *handle, const char *query, const char *scope, int *out_count);
 
+/* The sentence a hit is in, cut from the book. Null with no error means there is
+   none to show; null with one means the book could not be read. */
+char *ts_snippet(ts_index *handle, int doc_id, int entry_idx, int position, int radius);
+
 /* Building, in as many steps as the caller wants to give back control for. */
 int ts_index_begin(ts_index *handle, const char *dir);
 int ts_index_step(ts_index *handle, int budget);
@@ -63,6 +67,15 @@ int ts_set_config_text(ts_index *handle, const char *text);
 local record Hit
    doc_id: integer
    score: integer
+   --- Which section of the book the match is in.
+   entry_idx: integer
+   --- Where in that section it starts, counted in tokens from its first one.
+   ---
+   --- These two are what a preview of the sentence needs, and they come back
+   --- with the result rather than being looked up again: a second search to find
+   --- where the first one matched would be a second decode, and a decode is what
+   --- this is trying to spend once.
+   position: integer
 end
 
 --- How much content an index holds. Phrase queries only work on Full.
@@ -271,9 +284,14 @@ local function search_pattern(handle: Handle, query: string, opts?: SearchOption
    local lines: {string} = drain(buf)
    local result: {Hit} = {}
    for _, line in ipairs(lines) do
-      local id, score = line:match("^(%d+)%s+(%d+)$")
-      if id and score then
-         result[#result + 1] = { doc_id = tonumber(id) as integer, score = tonumber(score) as integer }
+      local id, score, entry, position = line:match("^(%d+)%s+(%d+)%s+(%d+)%s+(%d+)$")
+      if id then
+         result[#result + 1] = {
+            doc_id = tonumber(id) as integer,
+            score = tonumber(score) as integer,
+            entry_idx = tonumber(entry) as integer,
+            position = tonumber(position) as integer,
+         }
       end
    end
    if o.limit and o.limit > 0 and #result > o.limit then
@@ -296,9 +314,14 @@ local function search(handle: Handle, query: string, opts?: SearchOptions): {Hit
 
    local result: {Hit} = {}
    for _, line in ipairs(lines) do
-      local id, score = line:match("^(%d+)%s+(%d+)$")
-      if id and score then
-         result[#result + 1] = { doc_id = tonumber(id) as integer, score = tonumber(score) as integer }
+      local id, score, entry, position = line:match("^(%d+)%s+(%d+)%s+(%d+)%s+(%d+)$")
+      if id then
+         result[#result + 1] = {
+            doc_id = tonumber(id) as integer,
+            score = tonumber(score) as integer,
+            entry_idx = tonumber(entry) as integer,
+            position = tonumber(position) as integer,
+         }
       end
    end
    if o.limit and o.limit > 0 and #result > o.limit then
@@ -327,7 +350,15 @@ local function search_meta(handle: Handle, query: string, opts?: SearchOptions):
    for _, line in ipairs(lines) do
       local id = line:match("^(%d+)")
       if id then
-         result[#result + 1] = { doc_id = tonumber(id) as integer, score = 0 as integer }
+         -- No section and no position: a metadata hit is a match on the cover and
+         --- the title page, not in the text, so there is no sentence to show and
+         --- a row like this opens the book rather than previewing it.
+         result[#result + 1] = {
+            doc_id = tonumber(id) as integer,
+            score = 0 as integer,
+            entry_idx = 0 as integer,
+            position = 0 as integer,
+         }
       end
    end
    if o.limit and o.limit > 0 and #result > o.limit then
@@ -377,6 +408,26 @@ end
 --- library, and the slow path.
 ---
 --- Returns the count, or -1 plus the engine's reason.
+--- The sentence a hit is in, taken out of the book the hit is in.
+---
+--- Returns an empty string when there is nothing to show, which is not a
+--- failure: a book whose sections moved since it was indexed has no sentence to
+--- point at, and the caller is expected to show the book instead of an excuse.
+--- It costs a decode of one book, so it is asked for when the reader asks and
+--- never ahead of time.
+local function snippet(handle: Handle, doc_id: integer, entry_idx: integer,
+                     position: integer, radius?: integer): string, string
+   local take: integer = radius or 80
+   local buf: any = C.ts_snippet(handle.ptr, doc_id, entry_idx, position, take)
+   if buf == ffi.NULL then
+      return "", last_error()
+   end
+   --- Read before freeing, for the same reason as every other buffer here.
+   local text: string = ffi.string(buf)
+   C.ts_free(buf)
+   return text, ""
+end
+
 local function index_begin(handle: Handle, dir: string): integer, string
    local left: integer = C.ts_index_begin(handle.ptr, dir)
    if left < 0 then
@@ -434,6 +485,7 @@ return {
    search_as = search_as,
    search_pattern = search_pattern,
    index_info = index_info,
+   snippet = snippet,
    index_begin = index_begin,
    index_step = index_step,
    index_end = index_end,

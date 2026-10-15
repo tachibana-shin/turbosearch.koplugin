@@ -103,8 +103,55 @@ the confirm box shows it. **Index** is the same work offered by itself, for a
 reader who knows they are about to look in this folder and would rather pay for
 it once than once per query.
 
-A tap opens the book. The results menu carries each book's title and its format
-on the right, where the reader's own file browser puts it.
+A list of results is the reader's own book list — `BookList`, the same class the
+file browser's book tabs are built on — so it carries each book's title with its
+format on the right, and a cover beside it where the reader has CoverBrowser,
+the plugin that supplies covers to every book list in the reader. It is a book
+list and not a menu because a search result that looks like the shelf the book
+came from is the difference between a search and a tool. The letters down the
+left edge are off: nobody is typing at a shelf.
+
+A tap on a row shows the sentence the match is in, cut out of the book itself:
+
+```
+Tóm lại, Hikigaya Hachiman là một kẻ thối nát2. Lúc nào Yukinoshita
+Yukino cũng rất cố chấp…
+
+                          [Quay lại]      [Mở]
+```
+
+The index stores where a word is, never what it is — there is no sentence in the
+database to recover, only a position and the map that leads to it. So the preview
+is one decode of one book, paid when the reader asks for it and never before: ten
+rows would be ten decodes of books nobody has said yes to opening. What is read
+is held on the row, so a second look at the same row costs nothing.
+
+The sentence is cut on word edges and from the original text, accents and all —
+"óm lại" is not "Tóm lại" — and a match with no sentence behind it, a metadata
+match or a book whose sections have moved, opens the book instead of opening a
+box that apologises.
+
+Two defects in the text behind it showed up only by doing this, and both were
+making the index itself worse than it looked:
+
+- **Adjacent blocks ran their words together.** Markup was stripped without
+  saying where a break was, so a table of contents indexed as
+  `Mục lụcTập 1 -Minh họa1.` — which also means the tokenizer stored `nát2`
+  for `nát 2.`, and a search for `nát`, the word that is in the book, found
+  nothing. Block elements now end in a space, and inline ones do not:
+  `<b>bold</b>text` is still "boldtext", as in any browser.
+- **The navigation document was content.** An EPUB names its table of contents
+  in the manifest (`properties="nav"`), and indexing it meant a word that
+  happened to be in a chapter title answered with the contents page — measured
+  on one book, the contents page held the phrase twice and its prose sixty
+  times, and the contents won. It is skipped now.
+
+Because an entry map holds byte offsets into the text it was read from, changing
+how text is laid out invalidates every map already written — and they do not say
+so. `TEXT_LAYOUT` is recorded in the index for each pass that reads something, so
+a build that lays text out differently than the last one reads every book again
+rather than showing a sentence from the wrong place. `ts_config_text` does not
+carry it, and not by accident: it is a fact about the index, never a choice.
 
 **Settings** (left of the group, or the second menu entry) is one screen holding
 every setting the engine acts on, in two panes — not a report behind a button

@@ -480,8 +480,22 @@ pub fn locate(text: &str, from_pos: u32, from_off: u32, target_pos: u32) -> Opti
 /// Clamped to char boundaries, so a multi-byte character is never split.
 pub fn snippet(text: &str, byte_off: usize, radius: usize) -> String {
     let byte_off = byte_off.min(text.len());
-    let start = floor(text, byte_off.saturating_sub(radius));
-    let end = ceil(text, byte_off.saturating_add(radius));
+    let mut start = floor(text, byte_off.saturating_sub(radius));
+    let mut end = ceil(text, byte_off.saturating_add(radius));
+
+    // Both edges are walked out to the whitespace beyond them. A window that
+    // opens in the middle of a word offers half a word the reader has to guess
+    // at — "óm lại" is not "Tóm lại" — and the words have to stay the source
+    // text's own, so the window is widened by part of one word rather than
+    // padded with anything. Widened, and never past the match in the middle:
+    // the sentence the reader asked about is the one that has to survive.
+    while start > 0 && !text[..start].ends_with(char::is_whitespace) {
+        start = floor(text, start - 1);
+    }
+    while end < text.len() && !text[end..].starts_with(char::is_whitespace) {
+        end = ceil(text, end + 1);
+    }
+
     text[start..end]
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -756,9 +770,20 @@ mod tests {
     fn a_snippet_shows_the_original_text_with_diacritics() {
         let text = "Thám tử lừng danh Conan xuất hiện ở đảo Hải tặc";
         let off = locate(text, 0, 0, 1).unwrap();
-        // The window is cut on bytes, so it stops mid-word; what matters is that
-        // the diacritics survived and the words came from the source text.
-        assert_eq!(snippet(text, off, 30), "Thám tử lừng danh Conan xuất");
+        // What matters is that the diacritics survived, the words came from the
+        // source text, and the edge that fell inside a word walked out to the
+        // end of it rather than showing half of "hiện" as if it were a word.
+        assert_eq!(snippet(text, off, 30), "Thám tử lừng danh Conan xuất hiện");
+    }
+
+    #[test]
+    fn a_snippet_ends_on_a_whole_word_both_ways() {
+        let text = "The morning after the calculator arrived, everything changed. ";
+        let off = text.find("calculator").expect("the word is in there");
+        // A radius of six cuts "r" off the front of "after" and "lcu" off the
+        // back of "calculator" — both are half words the reader would have to
+        // finish in their head.
+        assert_eq!(snippet(text, off, 6), "after the calculator");
     }
 
     #[test]

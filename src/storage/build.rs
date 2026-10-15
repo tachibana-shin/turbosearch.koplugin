@@ -18,7 +18,7 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::format::{epub, mobi, plain, sniff};
-use crate::index::{EntryMap, dict, entrymap, writer};
+use crate::index::{EntryMap, dict, entrymap, query, writer};
 use crate::storage::book::{Book, FileEntry, Format, ScanPlan, scan_full, scan_scope};
 use crate::storage::config::{Config, ContentMode};
 use crate::storage::metadata::{BookMetaRecord, Provenance, rebuild_index};
@@ -274,6 +274,13 @@ impl Session {
             engine.put_metadata_batch(*book_id, record)?;
             self.stats.meta_rows += 1;
         }
+        // Recorded only now, and only when something was written: the record
+        // means "every book in here was read by a build of this layout", and a
+        // session that read nothing did not make that true of the books it left
+        // alone.
+        if self.stats.indexed > 0 {
+            engine.set_text_layout(crate::format::html::TEXT_LAYOUT)?;
+        }
         // Everything above with `*_batch` is parked in memory until one durable
         // commit, and the metadata index is rebuilt from rows that have a live
         // `BOOKS` row — so it has to be read after that commit, not before.
@@ -500,6 +507,53 @@ pub struct Decoded {
 }
 
 /// Reads a book's sections in reading order, as decoded text.
+/// The sentence around a match, read from the book the match is in.
+///
+/// The index stores where a word is, never what it is: there is no sentence
+/// in SQLite to recover, only a position and the entry map that leads to it.
+/// So this is the one call that pays for a decode, and paying it per question
+/// rather than per result is what keeps the screen opening — ten rows would
+/// be ten decodes of books the reader has not said yes to.
+///
+/// `None` is not a failure. A book whose sections moved since it was indexed,
+/// or whose book row is gone, has no sentence to show, and a reader shown the
+/// book itself is shown something that still opens.
+pub fn snippet_for(
+    engine: &Engine,
+    doc_id: u32,
+    entry_idx: u16,
+    position: u32,
+    radius: usize,
+) -> RunResult<Option<String>> {
+    let Ok(book_id) = u16::try_from(doc_id) else {
+        return Ok(None);
+    };
+    let Some(book) = engine.book(book_id)? else {
+        return Ok(None);
+    };
+    let decoded = load_sections(Path::new(&book.path), book.format)?;
+    let Some(section) = decoded.sections.get(entry_idx as usize) else {
+        return Ok(None);
+    };
+    let text = String::from_utf8_lossy(section).into_owned();
+    // A `Hit` without the score: `hit_snippet` only reads the section and the
+    // position out of it, and this is a hit's positions being asked about
+    // through the FFI rather than a result of a search.
+    let hit = query::Hit {
+        doc_id,
+        score: 0,
+        first_position: position,
+        entry_idx,
+    };
+    Ok(query::hit_snippet(
+        engine,
+        doc_id,
+        &hit,
+        &|_doc, _entry| Some(text.clone()),
+        radius,
+    ))
+}
+
 pub fn load_sections(path: &Path, format: Format) -> RunResult<Decoded> {
     match format {
         Format::Epub | Format::Kepub => {

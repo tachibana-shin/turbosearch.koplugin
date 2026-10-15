@@ -58,6 +58,11 @@ package.path = PLUGIN_DIR .. "?.lua;" .. package.path
                 captured.dialog = args
             elseif args.item_table then
                 captured.menu = args
+            elseif args.ok_text then
+                --- A question, which is a screen of its own rather than the
+                --- one-line bar: a tap that opens a box has to be told apart
+                --- from an engine that refused.
+                captured.confirm = args
             elseif args.buttons then
                 captured.popup = args
             else
@@ -94,6 +99,9 @@ package.path = PLUGIN_DIR .. "?.lua;" .. package.path
     package.preload["ui/widget/checkbutton"] = loader(widgets)
     package.preload["ui/widget/inputdialog"] = loader(widgets)
     package.preload["ui/widget/menu"] = loader(widgets)
+    --- The results list is a book list, not a plain menu: same constructor,
+    --- same rows, so the same stub answers it.
+    package.preload["ui/widget/booklist"] = loader(widgets)
     package.preload["ui/widget/confirmbox"] = loader(widgets)
     package.preload["ui/widget/buttondialog"] = loader(widgets)
     -- Measuring, not drawing: the plugin sizes the right-hand column from the
@@ -530,6 +538,66 @@ check("indexing an already-built folder says so rather than claiming work",
     captured.info and captured.info.text)
 instance:loadSettings():saveSetting("index_path", real_index)
 instance.ui = nil
+
+io.write("\nthe sentence behind a row\n")
+
+-- Ask again so there is a list to look at: the index path was put back after the
+--- scoping checks, and a row means nothing without the search that built it.
+captured.menu = nil
+captured.info = nil
+instance:search(QUERY)
+check("a search leaves a list behind to look into",
+    captured.menu and captured.menu.item_table and #captured.menu.item_table > 0,
+    captured.menu and #captured.menu.item_table)
+
+-- The row is not the last word. Tapping one reads the sentence the match is in,
+-- out of the book, which is the one thing the index cannot answer for itself: it
+-- stores where a word is, never what it is.
+local row = captured.menu.item_table[1]
+captured.confirm = nil
+captured.info = nil
+instance:show_row(row)
+
+check("a row carries where its sentence is found",
+    type(row.doc_id) == "number" and type(row.entry_idx) == "number"
+    and type(row.position) == "number",
+    row.doc_id, row.entry_idx, row.position)
+check("tapping a row shows the sentence it found",
+    captured.confirm ~= nil and captured.confirm.text ~= "",
+    captured.confirm and captured.confirm.text)
+check("and the sentence really contains the word",
+    captured.confirm and captured.confirm.text:lower()
+        :find(QUERY:lower(), 1, true) ~= nil,
+    captured.confirm and captured.confirm.text)
+check("the sentence is the book's own text and not a summary",
+    captured.confirm and #captured.confirm.text > #QUERY * 2,
+    captured.confirm and #captured.confirm.text)
+
+-- The book is one tap further on, and a sentence with no way through to the book
+--- it came from would be a dead end.
+local opened = nil
+--- The same stub the plugin itself holds, so what is replaced here is what the
+--- plugin's next call reaches.
+local file_manager = require("apps/filemanager/filemanager")
+local real_open = file_manager.openFile
+file_manager.openFile = function(_ui, path) opened = path end
+captured.confirm.ok_callback()
+check("the box offers the book the sentence came from",
+    opened == row.path, opened)
+file_manager.openFile = real_open
+
+--- Read once: the second look at a row is the reason the sentence is held on it.
+local reads = 0
+local real_read = instance.read_sentence
+instance.read_sentence = function(self, r)
+    reads = reads + 1
+    return real_read(self, r)
+end
+captured.confirm = nil
+instance:show_row(row)
+check("a second look at the same row reads nothing new",
+    reads == 0, "reads: " .. reads)
+instance.read_sentence = real_read
 
 io.write("\nrebuilding the menu\n")
 -- The handle is closed before the menu is built, so a second search must work

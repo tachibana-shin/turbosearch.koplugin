@@ -107,6 +107,62 @@ pub extern "C" fn ts_alloc_buffer(len: usize) -> *mut c_char {
 /// # Safety
 /// `ptr` must be non-null and come from one of the `*_buffer` or outbound
 /// functions. Passing null is allowed and does nothing.
+/// The sentence a hit is in, cut from the book the hit is in.
+///
+/// A match with no sentence — its sections moved since it was indexed, or its
+/// book row is gone — returns a null pointer and no error, and the caller is
+/// expected to show the book instead: a row that opens is better than a row that
+/// apologizes. Reading it costs a decode of the book, which is why it is a
+/// separate call and not four more fields on every search.
+///
+/// `radius` is roughly how many characters either side of the word to take.
+/// A negative `radius` is treated as none rather than as a huge one.
+///
+/// # Safety
+/// `handle` must come from [`ts_open`]. The returned pointer isfreed by the
+/// caller with [`ts_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_snippet(
+    handle: *mut TsIndex,
+    doc_id: c_int,
+    entry_idx: c_int,
+    position: c_int,
+    radius: c_int,
+) -> *mut c_char {
+    unsafe {
+        let Some(handle) = as_ref(handle) else {
+            set_error("ts_snippet: null handle");
+            return std::ptr::null_mut();
+        };
+        let out = crate::storage::build::snippet_for(
+            handle.engine,
+            doc_id as u32,
+            entry_idx as u16,
+            position as u32,
+            radius.max(0) as usize,
+        );
+        match out {
+            Ok(Some(text)) => {
+                clear_error();
+                to_c_string(&text)
+            }
+            Ok(None) => {
+                clear_error();
+                std::ptr::null_mut()
+            }
+            Err(e) => {
+                set_error(&format!("ts_snippet: {e}"));
+                std::ptr::null_mut()
+            }
+        }
+    }
+}
+
+/// Frees a buffer returned by any function in this module.
+///
+/// # Safety
+/// `ptr` must be non-null and come from one of the `*_buffer` or outbound
+/// functions. Passing null is allowed and does nothing.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_free(ptr: *mut c_char) {
     unsafe {
@@ -334,7 +390,10 @@ fn regex_impl(
 ) -> crate::storage::RunResult<(*mut c_char, c_int)> {
     let hits = query::search_regex(handle.engine, &handle.dict, query)?;
     let hits = query::live_hits(handle.engine, hits, scope)?;
-    let buffer = lines_buffer(hits.iter().map(|h| (h.doc_id, h.score)));
+    let buffer = lines_buffer(
+        hits.iter()
+            .map(|h| (h.doc_id, h.score, h.entry_idx as u32, h.first_position)),
+    );
     Ok((buffer, hits.len() as c_int))
 }
 
@@ -479,7 +538,10 @@ fn search_impl(
 ) -> crate::storage::RunResult<(*mut c_char, c_int)> {
     let hits = query::search_phrase(handle.engine, &handle.dict, query)?;
     let hits = query::live_hits(handle.engine, hits, scope)?;
-    let buffer = lines_buffer(hits.iter().map(|h| (h.doc_id, h.score)));
+    let buffer = lines_buffer(
+        hits.iter()
+            .map(|h| (h.doc_id, h.score, h.entry_idx as u32, h.first_position)),
+    );
     Ok((buffer, hits.len() as c_int))
 }
 
@@ -811,11 +873,16 @@ fn to_c_string(text: &str) -> *mut c_char {
     raw as *mut c_char
 }
 
-/// Builds a buffer of `"<id> <score>\n"` lines.
-fn lines_buffer(rows: impl Iterator<Item = (u32, u32)>) -> *mut c_char {
+/// Builds a buffer of `"<id> <score> <entry_idx> <first_position>\n"` lines.
+///
+/// Where the hit is, not only what it scored: the sentence a reader is shown
+/// comes from the section and the position, and neither is in the id and the
+/// score. Both search paths write through here, so a hit from either one carries
+/// enough to be previewed.
+fn lines_buffer(rows: impl Iterator<Item = (u32, u32, u32, u32)>) -> *mut c_char {
     let mut body = String::new();
-    for (id, score) in rows {
-        body.push_str(&format!("{id} {score}\n"));
+    for (id, score, entry_idx, position) in rows {
+        body.push_str(&format!("{id} {score} {entry_idx} {position}\n"));
     }
     to_c_string(&body)
 }
@@ -895,9 +962,9 @@ mod tests {
 
     #[test]
     fn lines_buffer_formats_one_line_per_result() {
-        let buf = lines_buffer([(7u32, 12u32), (9u32, 3u32)].into_iter());
+        let buf = lines_buffer([(7u32, 12u32, 3u32, 40u32), (9u32, 3u32, 0u32, 2u32)].into_iter());
         let back = unsafe { std::ffi::CStr::from_ptr(buf) }.to_str().unwrap();
-        assert_eq!(back, "7 12\n9 3\n");
+        assert_eq!(back, "7 12 3 40\n9 3 0 2\n");
         unsafe { ts_free(buf) };
     }
 

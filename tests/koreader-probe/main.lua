@@ -44,6 +44,8 @@ end
 --                              on screen, unaddressable by automation because
 --                              KOReader has no input device on this machine
 --   TURBOSEARCH_PROBE=settings open the plugin's settings screen
+--   TURBOSEARCH_PROBE=results  show the results list and then the sentence
+--                              behind its first row, both left on screen
 --   TURBOSEARCH_PROBE=index    build the index where the reader is standing,
 --                              one batch per turn of the event loop, and search
 --   TURBOSEARCH_PROBE=1        run the full verification and close everything
@@ -52,6 +54,7 @@ local PROBE_PATH = MODE == "1"
 local SHOW_DIALOG = MODE == "show"
 local SHOW_SETTINGS = MODE == "settings"
 local RUN_INDEX = MODE == "index"
+local RUN_RESULTS = MODE == "results"
 
 --- Points the plugin at this run's index, and hands the reader's own back.
 ---
@@ -82,7 +85,8 @@ local Probe = WidgetContainer:extend{
 }
 
 function Probe:init()
-    if not PROBE_PATH and not SHOW_DIALOG and not SHOW_SETTINGS and not RUN_INDEX then
+    if not PROBE_PATH and not SHOW_DIALOG and not SHOW_SETTINGS and not RUN_INDEX
+            and not RUN_RESULTS then
         return
     end
     UIManager:scheduleIn(4, function()
@@ -98,7 +102,92 @@ function Probe:init()
             self:probeIndex()
             return
         end
+        if RUN_RESULTS then
+            self:probeResults()
+            return
+        end
         self:probe()
+    end)
+end
+
+--- Shows the results list, and then the sentence behind its first row.
+---
+--- Both are left on screen because the list is what a reader looks at and the
+--- sentence is what they were looking for, and neither is worth much described
+--- in a log. The list is the plugin's own, built through the same `results`
+--- the Search button calls, so what is on screen here is what a reader gets.
+function Probe:probeResults()
+    logger.info("PROBE: ==== results ====")
+
+    local PluginLoader = require("pluginloader")
+    local instance = PluginLoader:getPluginInstance("turbosearch")
+    if not instance then
+        logger.info("PROBE: no turbosearch instance loaded")
+        return
+    end
+    logger.info("PROBE: found the plugin instance")
+
+    local restore = aim_at(instance)
+    local forced = os.getenv("TURBOSEARCH_HERE")
+    if forced then
+        instance.ui = { document = { file = forced } }
+    end
+    local here = instance:current_directory()
+    local opts = instance:readSearchOptions()
+    logger.info("PROBE: standing in", here == "" and "(every book)" or here)
+
+    local engine = instance:engine()
+    if not engine then
+        logger.info("PROBE: engine not loaded")
+        restore()
+        return
+    end
+    local settings = instance:loadSettings()
+    local handle = engine.open_index(settings:readSetting("index_path", ""))
+    if not handle then
+        logger.info("PROBE: open_index failed")
+        restore()
+        return
+    end
+    local hits, why = engine.search(handle, QUERY, opts)
+    logger.info("PROBE: search", QUERY, #hits, tostring(why))
+
+    -- The plugin's own path, so the list on screen is the list a reader gets.
+    local Menu = require("ui/widget/menu")
+    local ok, err = pcall(function()
+        instance:results(engine, handle, QUERY, opts)
+    end)
+    logger.info("PROBE: results", ok, tostring(err))
+    local menu = instance.result_menu
+    if not menu then
+        restore()
+        return
+    end
+    logger.info("PROBE: rows", #menu.item_table)
+    for i = 1, math.min(#menu.item_table, 6) do
+        local row = menu.item_table[i]
+        logger.info("PROBE: row", i, row.text, "|", row.path,
+            "| previewable:", row.can_preview)
+    end
+
+    UIManager:scheduleIn(4, function()
+        shot("results-list")
+        -- The same menu, so the reader's own select path runs rather than a
+        --- copy of it.
+        local row = menu.item_table[1]
+        local shown, preview_err = pcall(function() instance:show_row(row) end)
+        logger.info("PROBE: preview", shown, tostring(preview_err),
+            row.looked and "(read the book)" or "(nothing to read)")
+        if row.preview == "" then
+            logger.info("PROBE: preview was empty — the book opened instead")
+        else
+            logger.info("PROBE: the sentence", row.preview)
+        end
+        UIManager:scheduleIn(3, function()
+            shot("results-sentence")
+            restore()
+            logger.info("PROBE: ==== end ====")
+        end)
     end)
 end
 

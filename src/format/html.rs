@@ -8,8 +8,43 @@
 //! their contents cannot leak into the token stream. Everything that survives is
 //! plain text, ready for the tokenizer.
 
+use lol_html::html_content::ContentType;
 use lol_html::{RewriteStrSettings, element, rewrite_str};
 use std::io;
+
+/// The text layout this extractor produces, as a number stored in the index.
+///
+/// Every entry map holds byte offsets into text produced by this module, so a
+/// change to where the spaces go invalidates every map already written — and
+/// they do not say so. An index built by an older layout keeps answering and
+/// then shows a sentence from the wrong place, which is the worst kind of wrong
+/// because it looks right. Bump this when `extract_text` changes, and the scan
+/// re-reads every book it had already read.
+pub const TEXT_LAYOUT: u32 = 1;
+
+/// The block elements, whose end is a break in the text.
+///
+/// An inline boundary is not: `<b>bold</b>text` is "boldtext" in every browser,
+/// and so it is here. `<p>a</p><p>b</p>` is "a b" — and without saying so the
+/// extractor emits "ab", which is a word nobody can search for and a sentence
+/// that reads "Mục lụcTập 1 -Minh họa1." in full.
+///
+/// This is not cosmetic. A book's own table of contents is a run of adjacent
+/// block elements, so a library indexed without it stored "nát2" for
+/// "nát 2." — and a search for `nát`, the word that is in the book, answered
+/// with nothing at all.
+macro_rules! block_handlers {
+    ($($tag:literal),* $(,)?) => {
+        vec![$( element!($tag, |el| {
+            el.remove_and_keep_content();
+            // A space rather than a newline: the tokenizer splits on either,
+            // and a page of newlines would make the stored text one line per
+            // block for no reader to see.
+            el.append(" ", ContentType::Text);
+            Ok(())
+        }), )*]
+    };
+}
 
 /// Extracts the text of an HTML or XHTML document.
 ///
@@ -29,35 +64,73 @@ pub fn extract_text(input: &[u8]) -> io::Result<Vec<u8>> {
     let rewritten = rewrite_str(
         &source,
         RewriteStrSettings {
-            element_content_handlers: vec![
-                element!("head", |el| {
+            element_content_handlers: {
+                let mut handlers = block_handlers!(
+                    "address",
+                    "article",
+                    "aside",
+                    "blockquote",
+                    "br",
+                    "dd",
+                    "div",
+                    "dl",
+                    "dt",
+                    "figcaption",
+                    "figure",
+                    "footer",
+                    "h1",
+                    "h2",
+                    "h3",
+                    "h4",
+                    "h5",
+                    "h6",
+                    "header",
+                    "hr",
+                    "li",
+                    "main",
+                    "nav",
+                    "ol",
+                    "p",
+                    "pre",
+                    "section",
+                    "table",
+                    "tbody",
+                    "td",
+                    "tfoot",
+                    "th",
+                    "thead",
+                    "tr",
+                    "ul",
+                );
+                handlers.push(element!("head", |el| {
                     el.remove();
                     Ok(())
-                }),
-                element!("script", |el| {
+                }));
+                handlers.push(element!("script", |el| {
                     el.remove();
                     Ok(())
-                }),
-                element!("style", |el| {
+                }));
+                handlers.push(element!("style", |el| {
                     el.remove();
                     Ok(())
-                }),
-                element!("noscript", |el| {
+                }));
+                handlers.push(element!("noscript", |el| {
                     el.remove();
                     Ok(())
-                }),
-                element!("template", |el| {
+                }));
+                handlers.push(element!("template", |el| {
                     el.remove();
                     Ok(())
-                }),
-                element!("*", |el| {
+                }));
+                handlers.push(element!("*", |el| {
                     if el.removed() {
                         return Ok(());
                     }
                     el.remove_and_keep_content();
                     Ok(())
-                }),
-            ],
+                }));
+                handlers
+            },
             ..RewriteStrSettings::default()
         },
     );
@@ -291,6 +364,30 @@ mod tests {
         assert!(t.contains("real words"), "{t}");
         assert!(!t.contains("not indexed"), "script body leaked");
         assert!(!t.contains("nope"), "style body leaked");
+    }
+
+    #[test]
+    fn adjacent_blocks_do_not_run_their_words_together() {
+        // A book's own table of contents is a run of adjacent blocks, so this is
+        // the shape of every contents page in the library.
+        let html = "<body><h1>Mục lục</h1><p>Tập 1 - Minh họa</p>                    <ol><li>Tóm lại, Hikigaya là kẻ thối nát</li>                    <li>Lúc nào Yukino cũng cố chấp</li></ol></body>"
+            .as_bytes();
+        let s = String::from_utf8(extract_text(html).unwrap()).unwrap();
+        assert!(
+            !s.contains("Mục lụcTập"),
+            "the heading ran into the next block: {s}"
+        );
+        assert!(
+            s.contains("nát") && !s.contains("nát2"),
+            "the list number glued itself to the word before it: {s}"
+        );
+        // Inline boundaries are not breaks, so this still holds.
+        let inline = "<body><p>kem <b>topping</b> ngọt</p></body>".as_bytes();
+        let s2 = String::from_utf8(extract_text(inline).unwrap()).unwrap();
+        assert!(
+            s2.contains("kem topping ngọt"),
+            "an inline boundary must not gain a space: {s2}"
+        );
     }
 
     #[test]

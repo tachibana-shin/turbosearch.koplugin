@@ -228,6 +228,8 @@ impl Engine {
 
     /// Key under `meta` that holds the next id to hand out.
     pub const NEXT_ID_KEY: &str = "next_id";
+    /// The text layout every book in this index was read with.
+    pub const TEXT_LAYOUT_KEY: &str = "text_layout";
 
     /// Seeds the id high-water mark from a `Meta` row, if it is ahead.
     ///
@@ -334,6 +336,77 @@ impl Engine {
                     .ok_or_else(|| RunError::IdRange(id)),
                 None => Ok(0),
             }
+        })
+    }
+
+    /// The text layout every book in this index was read with.
+    ///
+    /// `None` means nothing recorded one, which is what an index written before
+    /// layouts were recorded looks like — and an index with no record is an
+    /// index that has to be read again before any sentence can be trusted.
+    pub fn text_layout(&self) -> RunResult<Option<u32>> {
+        self.block_on(async {
+            let stored: Option<Vec<u8>> =
+                sqlx::query_scalar("SELECT value FROM meta WHERE key = ?1")
+                    .bind(Self::TEXT_LAYOUT_KEY)
+                    .fetch_optional(self.pool())
+                    .await?;
+            Ok(stored
+                .as_deref()
+                .and_then(|b| <[u8; 4]>::try_from(b).ok())
+                .map(u32::from_le_bytes))
+        })
+    }
+
+    /// Records the text layout, and never moves it backwards.
+    ///
+    /// Monotone, because the record means "every book in here was read by a
+    /// build of this layout", and an older build finishing after a newer one
+    /// would make that a lie about the books it never touched.
+    pub fn set_text_layout(&self, layout: u32) -> RunResult<()> {
+        self.block_on(async {
+            // Read inside the same block rather than through `text_layout`:
+            // a `block_on` inside a `block_on` is a panic on the second one, and
+            // this is called from inside a build that is already inside one.
+            let stored: Option<Vec<u8>> =
+                sqlx::query_scalar("SELECT value FROM meta WHERE key = ?1")
+                    .bind(Self::TEXT_LAYOUT_KEY)
+                    .fetch_optional(self.pool())
+                    .await?;
+            let current = stored
+                .as_deref()
+                .and_then(|b| <[u8; 4]>::try_from(b).ok())
+                .map(u32::from_le_bytes)
+                .unwrap_or(0);
+            if current >= layout {
+                return Ok(());
+            }
+            sqlx::query(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            )
+            .bind(Self::TEXT_LAYOUT_KEY)
+            .bind(layout.to_le_bytes().to_vec())
+            .execute(self.pool())
+            .await?;
+            Ok(())
+        })
+    }
+
+    /// Forgets the recorded text layout, which makes the next pass re-read
+    /// every book it already has.
+    ///
+    /// A rebuild, short of deleting the file: the books, their postings and the
+    /// settings all stay, and only the claim that the entry maps still point at
+    /// the text they were read from is withdrawn. Useful after a change to how
+    /// text is laid out — which is the only thing that claim depends on.
+    pub fn reset_text_layout(&self) -> RunResult<()> {
+        self.block_on(async {
+            sqlx::query("DELETE FROM meta WHERE key = ?1")
+                .bind(Self::TEXT_LAYOUT_KEY)
+                .execute(self.pool())
+                .await?;
+            Ok(())
         })
     }
 
